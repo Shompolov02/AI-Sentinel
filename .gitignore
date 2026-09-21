@@ -1,0 +1,82 @@
+# Operating-system and editor noise
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+Thumbs.db
+.vscode/
+.idea/
+
+# Python environments, caches and build output
+.venv/
+venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# Local AI assistants and generated AI artifacts
+.ai/
+.aider/
+.aider*
+.claude/
+.cline/
+.continue/
+.cursor/
+.github/copilot-instructions.local.md
+.windsurf/
+ai-output/
+ai-artifacts/
+prompts/local/
+*.prompt.local.*
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+secrets/
+credentials/
+
+# Reports, temporary files and local research output
+reports/
+artifacts/
+tmp/
+temp/
+.tmp/
+*.log
+*.out
+*.swp
+*.swo
+*.bak
+
+# Tool-generated local indexes and databases
+.codebase-memory/
+.tox/
+.nox/
+.hypothesis/
+
+# Local Docker and infrastructure state
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+docker-data/
+volumes/
