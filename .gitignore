@@ -28,6 +28,11 @@ build/
 .eggs/
 
 # Local AI assistants and generated AI artifacts
+.agents/
+.clinerules
+.codebase-memory/
+CONTEXT.md
+skills-lock.json
 .ai/
 .aider/
 .aider*
