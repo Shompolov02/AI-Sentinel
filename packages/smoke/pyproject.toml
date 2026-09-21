@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling>=1.25,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ai-sentinel-smoke"
+version = "0.1.0"
+description = "Neutral packaging and test-discovery smoke component for AI-Sentinel"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+ai-sentinel-smoke = "ai_sentinel_smoke:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ai_sentinel_smoke"]

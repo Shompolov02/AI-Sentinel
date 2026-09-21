@@ -22,9 +22,14 @@ AI-Sentinel (САЗИИ) — greenfield-монорепозиторий для с
 
 ```text
 cp .env.example .env
+uv sync --all-packages --locked
+uv run pytest
+uv run ai-sentinel-smoke
 ```
 
 Шаблон не содержит секретов, адресов инфраструктуры или выбранных провайдеров. Файл `.env` остаётся локальным и игнорируется Git.
+
+Python workspace требует Python 3.10 или новее и управляется `uv`. Команда `uv sync --all-packages --locked` использует только зафиксированные зависимости и завершается ошибкой при расхождении `pyproject.toml` и `uv.lock`.
 
 ## Правила изменений
 

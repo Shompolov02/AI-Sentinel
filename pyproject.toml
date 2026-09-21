@@ -1,0 +1,41 @@
+[project]
+name = "ai-sentinel-workspace"
+version = "0.1.0"
+description = "Development workspace for AI-Sentinel"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.uv]
+package = false
+default-groups = ["dev"]
+
+[tool.uv.workspace]
+members = ["packages/smoke"]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.11,<2",
+    "pytest>=8.3,<9",
+    "pytest-cov>=5,<6",
+    "ruff>=0.6,<1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers --strict-config"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+src = ["packages/smoke/src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+files = ["packages/smoke/src", "tests"]
