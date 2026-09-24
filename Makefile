@@ -35,6 +35,7 @@ secrets:
 
 container-check:
 	@command -v trivy >/dev/null || (echo "container-check requires trivy" >&2; exit 1)
+	docker compose -f infrastructure/compose/smoke.yaml config --quiet
 	trivy config --exit-code 1 infrastructure
 
 quality:

@@ -1,0 +1,24 @@
+name: ai-sentinel
+
+services:
+  smoke:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile
+    image: ai-sentinel-smoke:local
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev
+    user: "10001:10001"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - sentinel_baseline
+
+networks:
+  sentinel_baseline:
+    name: sentinel_baseline
+    driver: bridge

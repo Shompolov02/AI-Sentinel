@@ -93,3 +93,10 @@ def test_ci_tests_the_supported_minimum_python_version() -> None:
 def test_quality_uses_a_nonzero_coverage_gate() -> None:
     makefile = (PROJECT_ROOT / "Makefile").read_text(encoding="utf-8")
     assert "--cov-fail-under=80" in makefile
+
+
+def test_container_check_validates_the_normalized_compose_model() -> None:
+    makefile = (PROJECT_ROOT / "Makefile").read_text(encoding="utf-8")
+    assert (
+        "docker compose -f infrastructure/compose/smoke.yaml config --quiet" in makefile
+    )
