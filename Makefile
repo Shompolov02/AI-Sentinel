@@ -21,7 +21,7 @@ typecheck:
 	$(MYPY)
 
 test:
-	$(PYTEST) -q --cov=ai_sentinel_smoke --cov-fail-under=1
+	$(PYTEST) -q --cov=ai_sentinel_smoke --cov-fail-under=80
 
 sast:
 	$(UVX) --from semgrep==1.136.0 --with 'setuptools<81' semgrep scan --config p/python --error .
@@ -42,7 +42,7 @@ quality:
 	$(RUFF) format --check .
 	$(RUFF) check .
 	$(MYPY)
-	$(PYTEST) -q --cov=ai_sentinel_smoke --cov-fail-under=1
+	$(PYTEST) -q --cov=ai_sentinel_smoke --cov-fail-under=80
 	$(MAKE) sast
 	$(MAKE) sca
 	$(MAKE) secrets
