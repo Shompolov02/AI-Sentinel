@@ -31,6 +31,25 @@ uv run ai-sentinel-smoke
 
 Python workspace требует Python 3.10 или новее и управляется `uv`. Команда `uv sync --all-packages --locked` использует только зафиксированные зависимости и завершается ошибкой при расхождении `pyproject.toml` и `uv.lock`.
 
+## Команды разработки
+
+Канонический интерфейс разработки находится в `Makefile` и не требует ручной активации виртуального окружения:
+
+```text
+make bootstrap       # воспроизводимая установка из uv.lock
+make format          # форматирование Ruff
+make lint            # lint Ruff
+make typecheck       # строгий mypy
+make test            # pytest и coverage
+make sast            # Semgrep, fail-closed
+make sca             # pip-audit, fail-closed
+make secrets         # Gitleaks, fail-closed
+make container-check # Trivy, fail-closed
+make quality         # read-only полный quality gate
+```
+
+`quality` использует `ruff format --check`, поэтому не изменяет файлы. Security-команды намеренно завершаются с ошибкой, если соответствующий scanner не установлен.
+
 ## Правила изменений
 
 Изменения оформляются Conventional Commits. Новая бизнес-логика разрабатывается по Red-Green-Refactor; security-контроли, CI и документация должны оставаться аудируемыми. Перед реализацией соответствующей области необходимо свериться с `CONTEXT.md` и архитектурными решениями.
