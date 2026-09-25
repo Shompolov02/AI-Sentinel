@@ -12,6 +12,10 @@ concurrency:
   group: quality-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  GIT_SHA: ${{ github.sha }}
+  REPORT_DIR: .artifacts
+
 jobs:
   format:
     name: Format
@@ -84,6 +88,17 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: make bootstrap
       - run: make test
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: test-reports-${{ github.sha }}-py${{ matrix.python-version }}
+          path: |
+            .artifacts/test-results.xml
+            .artifacts/coverage.xml
+            .artifacts/ci-metadata.json
+          if-no-files-found: error
+          retention-days: 14
 
   security:
     name: Security
@@ -107,6 +122,17 @@ jobs:
           sudo install /tmp/trivy /usr/local/bin/trivy
       - run: make bootstrap
       - run: make sast sca secrets
+      - name: Upload security reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: security-reports-${{ github.sha }}
+          path: |
+            .artifacts/semgrep.sarif
+            .artifacts/pip-audit.json
+            .artifacts/ci-metadata.json
+          if-no-files-found: error
+          retention-days: 14
 
   container:
     name: Smoke container
@@ -129,3 +155,19 @@ jobs:
           sudo install /tmp/trivy /usr/local/bin/trivy
       - run: make bootstrap
       - run: make container-check
+      - name: Generate and validate smoke SBOM
+        if: always()
+        run: make sbom
+      - name: Upload container reports and SBOM
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: container-reports-${{ github.sha }}
+          path: |
+            .artifacts/trivy-fs.json
+            .artifacts/trivy-config.json
+            .artifacts/trivy-image.json
+            .artifacts/sbom.cdx.json
+            .artifacts/ci-metadata.json
+          if-no-files-found: error
+          retention-days: 14

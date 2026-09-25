@@ -20,6 +20,7 @@ CANONICAL_TARGETS = (
     "sca",
     "secrets",
     "container-check",
+    "sbom",
     "quality",
 )
 
@@ -207,3 +208,35 @@ def test_ci_jobs_use_explicit_minimum_permissions_and_stable_names() -> None:
         "uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38"
         in workflow
     )
+
+
+def test_smoke_sbom_is_generated_from_the_built_image_and_attested_to_source() -> None:
+    makefile = (PROJECT_ROOT / "Makefile").read_text(encoding="utf-8")
+
+    assert "$(TRIVY) image --format cyclonedx" in makefile
+    assert "$(SMOKE_IMAGE)" in makefile
+    assert "org.ai-sentinel.commit" in makefile
+    assert "org.ai-sentinel.lock-sha256" in makefile
+    assert "components" in makefile
+    assert "AI-Sentinel smoke" in makefile
+
+
+def test_ci_uploads_auditable_reports_even_when_checks_fail() -> None:
+    workflow = (PROJECT_ROOT / ".github/workflows/quality.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "actions/upload-artifact@" in workflow
+    assert "if: always()" in workflow
+    assert "retention-days: 14" in workflow
+    assert "coverage.xml" in workflow
+    assert "semgrep.sarif" in workflow
+    assert "trivy-fs.json" in workflow
+    assert "sbom.cdx.json" in workflow
+    assert "github.sha" in workflow
+
+
+def test_local_ci_reports_are_ignored_build_artifacts() -> None:
+    gitignore = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8")
+
+    assert ".artifacts/" in gitignore
