@@ -1,0 +1,7 @@
+title = "AI-Sentinel synthetic secret fixture"
+
+[[rules]]
+id = "ai-sentinel-synthetic-secret"
+description = "Synthetic secret used to test fail-closed secret scanning"
+regex = '''AI_SENTINEL_TEST_SECRET=[A-Za-z0-9-]{20,}'''
+keywords = ["AI_SENTINEL_TEST_SECRET"]

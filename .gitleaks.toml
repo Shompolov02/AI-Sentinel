@@ -1,0 +1,8 @@
+title = "AI-Sentinel Gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Synthetic secret used only to verify that the gate rejects findings"
+paths = ['''tests/security/fixtures/secret-unsafe\.txt''']

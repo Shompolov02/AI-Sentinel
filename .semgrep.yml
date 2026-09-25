@@ -1,0 +1,10 @@
+rules:
+  - id: no-shell-true-in-security-gates
+    message: Avoid shell=True because it enables shell injection.
+    severity: ERROR
+    languages:
+      - python
+    patterns:
+      - pattern: subprocess.$FUNC(..., shell=True, ...)
+    metadata:
+      category: security

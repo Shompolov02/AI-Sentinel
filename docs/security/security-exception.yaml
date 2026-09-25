@@ -1,0 +1,6 @@
+# Template for an expiring exception to an unfixable security finding.
+finding_id: "SEC-0000"
+secops_owner: "owner@example.invalid"
+justification: "Explain why the finding cannot currently be fixed."
+compensating_control: "Describe the control that reduces the residual risk."
+expires_on: "YYYY-MM-DD"

@@ -31,7 +31,7 @@ def test_smoke_dockerfile_defines_a_pinned_multistage_nonroot_runtime() -> None:
     dockerfile = DOCKERFILE.read_text(encoding="utf-8")
 
     assert dockerfile.count("FROM ") >= 2
-    assert "python:3.11.11-slim-bookworm@sha256:" in dockerfile
+    assert "python:3.11-slim-bookworm@sha256:" in dockerfile
     assert (
         "COPY packages/smoke/src/ai_sentinel_smoke /src/ai_sentinel_smoke" in dockerfile
     )

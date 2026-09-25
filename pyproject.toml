@@ -34,8 +34,10 @@ select = ["E", "F", "I", "B", "UP", "S"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["S101"]
+"tests/security/fixtures/*.py" = ["I001", "S602", "S607"]
 
 [tool.mypy]
 python_version = "3.10"
 strict = true
 files = ["packages/smoke/src", "tests"]
+exclude = ["tests/security/fixtures/"]

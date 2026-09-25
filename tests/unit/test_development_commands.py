@@ -100,3 +100,51 @@ def test_container_check_validates_the_normalized_compose_model() -> None:
     assert (
         "docker compose -f infrastructure/compose/smoke.yaml config --quiet" in makefile
     )
+
+
+def test_security_gates_use_pinned_scanners_and_fail_closed() -> None:
+    makefile = (PROJECT_ROOT / "Makefile").read_text(encoding="utf-8")
+
+    assert "semgrep==1.136.0" in makefile
+    assert "--config p/python --config .semgrep.yml --error" in makefile
+    assert "pip-audit==2.9.0" in makefile
+    assert "$(GITLEAKS) dir" in makefile
+    assert "$(TRIVY) fs" in makefile
+    assert "$(TRIVY) image" in makefile
+    assert "--severity HIGH,CRITICAL" in makefile
+    assert "--ignore-unfixed" in makefile
+    assert "scan_exit=$$?" in makefile
+    assert "test $$scan_exit -eq 1" in makefile
+    assert "test $$scan_exit -eq 42" in makefile
+
+
+def test_security_fixtures_and_exception_schema_are_repository_contracts() -> None:
+    assert (PROJECT_ROOT / "tests/security/fixtures/semgrep-unsafe.py").is_file()
+    assert (PROJECT_ROOT / "tests/security/fixtures/secret-unsafe.txt").is_file()
+    assert (
+        PROJECT_ROOT / "tests/security/fixtures/container-policy-unsafe/Dockerfile"
+    ).is_file()
+
+    exception_policy = (
+        PROJECT_ROOT / "docs/security/security-exception.yaml"
+    ).read_text(encoding="utf-8")
+    for required_field in (
+        "finding_id:",
+        "secops_owner:",
+        "justification:",
+        "compensating_control:",
+        "expires_on:",
+    ):
+        assert required_field in exception_policy
+
+
+def test_ci_runs_the_same_quality_gate_and_pins_security_tools() -> None:
+    workflow = (PROJECT_ROOT / ".github/workflows/quality.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "make quality" in workflow
+    assert "gitleaks_8.24.2_linux_x64.tar.gz" in workflow
+    assert "trivy_0.74.0_Linux-64bit.tar.gz" in workflow
+    assert "curl --fail" in workflow
+    assert "semgrep==1.136.0" in (PROJECT_ROOT / "Makefile").read_text(encoding="utf-8")
