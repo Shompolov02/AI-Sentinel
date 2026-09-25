@@ -1,0 +1,17 @@
+# Developer ownership. Auditor is intentionally read-only and is not an owner.
+* @Shompolov02
+
+# DevOps ownership: CI/CD, infrastructure, dependencies, container baseline.
+/.github/ @Shompolov02
+/infrastructure/ @Shompolov02
+/.github/workflows/ @Shompolov02
+/uv.lock @Shompolov02
+**/pyproject.toml @Shompolov02
+
+# SecOps ownership: security policy, exceptions, and protected context.
+/docs/security/ @Shompolov02
+/.gitleaks.toml @Shompolov02
+/.semgrep.yml @Shompolov02
+/infrastructure/docker/ @Shompolov02
+/infrastructure/compose/ @Shompolov02
+/CONTEXT.md @Shompolov02

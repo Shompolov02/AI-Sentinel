@@ -121,7 +121,7 @@ jobs:
           curl --fail --silent --show-error --location https://github.com/aquasecurity/trivy/releases/download/v0.74.0/trivy_0.74.0_Linux-64bit.tar.gz | tar -xz -C /tmp
           sudo install /tmp/trivy /usr/local/bin/trivy
       - run: make bootstrap
-      - run: make sast sca secrets
+      - run: make sast sca secrets security-exceptions
       - name: Upload security reports
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

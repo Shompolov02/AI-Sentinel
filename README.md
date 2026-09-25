@@ -44,11 +44,17 @@ make test            # pytest и coverage
 make sast            # Semgrep, fail-closed
 make sca             # pip-audit, fail-closed
 make secrets         # Gitleaks, fail-closed
+make security-exceptions # проверка срока и полноты Security Exceptions
 make container-check # Trivy, fail-closed
 make quality         # read-only полный quality gate
 ```
 
 `quality` использует `ruff format --check`, поэтому не изменяет файлы. Security-команды намеренно завершаются с ошибкой, если соответствующий scanner не установлен.
+
+Правила репозитория, роли, Definition of Done и процесс pull request описаны в
+[`docs/governance.md`](docs/governance.md). Сообщения об угрозах направляются
+через Security Exception/threat-reporting процесс в `docs/security/`; изменения
+архитектуры оформляются ADR в `docs/adr/`.
 
 ## Правила изменений
 

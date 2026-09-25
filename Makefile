@@ -14,7 +14,7 @@ REPORT_DIR ?= .artifacts
 GIT_SHA ?= $(shell git rev-parse HEAD)
 LOCK_SHA256 ?= $(shell (sha256sum uv.lock 2>/dev/null || shasum -a 256 uv.lock) | awk '{print $$1}')
 
-.PHONY: bootstrap audit-metadata format format-check lint typecheck test sast sca secrets smoke-image container-check sbom quality
+.PHONY: bootstrap audit-metadata format format-check lint typecheck test sast sca secrets security-exceptions smoke-image container-check sbom quality
 
 bootstrap:
 	$(UV) lock --check
@@ -50,6 +50,9 @@ secrets:
 	@command -v gitleaks >/dev/null || (echo "secrets requires gitleaks" >&2; exit 1)
 	$(GITLEAKS) dir --config .gitleaks.toml --redact --no-banner --exit-code 1 .
 	@set +e; $(GITLEAKS) dir --config tests/security/gitleaks-fixture.toml --redact --no-banner --exit-code 42 tests/security/fixtures >/dev/null 2>&1; scan_exit=$$?; set -e; test $$scan_exit -eq 42 || (echo "Gitleaks synthetic secret fixture was not rejected (exit $$scan_exit)" >&2; exit 1)
+
+security-exceptions:
+	$(UV) run python scripts/check_security_exceptions.py docs/security/exceptions
 
 smoke-image: audit-metadata
 	@command -v docker >/dev/null || (echo "smoke-image requires docker" >&2; exit 1)
@@ -88,4 +91,5 @@ quality:
 	$(MAKE) sast
 	$(MAKE) sca
 	$(MAKE) secrets
+	$(MAKE) security-exceptions
 	$(MAKE) container-check sbom

@@ -19,6 +19,7 @@ CANONICAL_TARGETS = (
     "sast",
     "sca",
     "secrets",
+    "security-exceptions",
     "container-check",
     "sbom",
     "quality",
@@ -133,8 +134,10 @@ def test_security_fixtures_and_exception_schema_are_repository_contracts() -> No
         "finding_id:",
         "secops_owner:",
         "justification:",
+        "scope:",
         "compensating_control:",
         "expires_on:",
+        "follow_up:",
     ):
         assert required_field in exception_policy
 
@@ -240,3 +243,39 @@ def test_local_ci_reports_are_ignored_build_artifacts() -> None:
     gitignore = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8")
 
     assert ".artifacts/" in gitignore
+
+
+def test_security_exception_check_rejects_expired_exception(tmp_path: Path) -> None:
+    exception = tmp_path / "expired.yaml"
+    exception.write_text(
+        """finding_id: \"SEC-0001\"\n"
+        "secops_owner: \"secops@example.invalid\"\n"
+        "justification: \"Temporary exception\"\n"
+        "scope: \"smoke image\"\n"
+        "compensating_control: \"Daily review\"\n"
+        "expires_on: \"2020-01-01\"\n"
+        "follow_up: \"Fix before expiry\"\n""",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(  # noqa: S603
+        [
+            sys.executable,
+            str(PROJECT_ROOT / "scripts/check_security_exceptions.py"),
+            str(exception),
+            "--today",
+            "2026-09-25",
+        ],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "expired" in result.stderr.lower()
+
+
+def test_security_exception_gate_is_part_of_quality() -> None:
+    makefile = (PROJECT_ROOT / "Makefile").read_text(encoding="utf-8")
+    assert "security-exceptions:" in makefile
+    assert "$(MAKE) security-exceptions" in makefile

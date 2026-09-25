@@ -2,5 +2,7 @@
 finding_id: "SEC-0000"
 secops_owner: "owner@example.invalid"
 justification: "Explain why the finding cannot currently be fixed."
+scope: "Name the exact affected asset, branch, or environment."
 compensating_control: "Describe the control that reduces the residual risk."
 expires_on: "YYYY-MM-DD"
+follow_up: "Link the remediation issue and owner."

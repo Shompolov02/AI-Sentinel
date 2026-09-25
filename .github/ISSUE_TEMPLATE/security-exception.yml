@@ -1,0 +1,47 @@
+name: Security Exception
+description: Request time-bounded acceptance of a security finding.
+title: "Security Exception: "
+labels: [security-exception]
+body:
+  - type: input
+    id: finding
+    attributes:
+      label: Finding or rule identifier
+    validations:
+      required: true
+  - type: textarea
+    id: justification
+    attributes:
+      label: Business and technical justification
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Exact scope and affected assets
+    validations:
+      required: true
+  - type: input
+    id: owner
+    attributes:
+      label: SecOps owner
+    validations:
+      required: true
+  - type: textarea
+    id: control
+    attributes:
+      label: Compensating control and monitoring
+    validations:
+      required: true
+  - type: input
+    id: expiry
+    attributes:
+      label: Expiry date (YYYY-MM-DD)
+    validations:
+      required: true
+  - type: textarea
+    id: follow_up
+    attributes:
+      label: Follow-up issue and remediation owner
+    validations:
+      required: true

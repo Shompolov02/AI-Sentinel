@@ -1,0 +1,17 @@
+name: Task
+description: Propose scoped engineering work.
+title: "Task: "
+labels: [task]
+body:
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome and acceptance criteria
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope, dependencies, and risks
+    validations:
+      required: true

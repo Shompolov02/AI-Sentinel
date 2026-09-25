@@ -6,3 +6,7 @@ useDefault = true
 [[allowlists]]
 description = "Synthetic secret used only to verify that the gate rejects findings"
 paths = ['''tests/security/fixtures/secret-unsafe\.txt''']
+
+[[allowlists]]
+description = "Generated CI reports are ignored by Git and may contain scanner fixture metadata"
+paths = ['''.artifacts/.*''']
