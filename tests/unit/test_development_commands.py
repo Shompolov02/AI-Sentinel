@@ -138,13 +138,72 @@ def test_security_fixtures_and_exception_schema_are_repository_contracts() -> No
         assert required_field in exception_policy
 
 
-def test_ci_runs_the_same_quality_gate_and_pins_security_tools() -> None:
+def test_ci_runs_canonical_targets_and_pins_security_tools() -> None:
     workflow = (PROJECT_ROOT / ".github/workflows/quality.yml").read_text(
         encoding="utf-8"
     )
 
-    assert "make quality" in workflow
+    assert "make format-check" in workflow
+    assert "make lint" in workflow
+    assert "make typecheck" in workflow
+    assert "make test" in workflow
+    assert "make sast sca secrets" in workflow
+    assert "make container-check" in workflow
+    assert "make quality" not in workflow
     assert "gitleaks_8.24.2_linux_x64.tar.gz" in workflow
     assert "trivy_0.74.0_Linux-64bit.tar.gz" in workflow
     assert "curl --fail" in workflow
     assert "semgrep==1.136.0" in (PROJECT_ROOT / "Makefile").read_text(encoding="utf-8")
+
+
+def test_format_check_is_a_canonical_read_only_command() -> None:
+    assert MAKE is not None
+    result = subprocess.run(  # noqa: S603
+        [MAKE, "-qp", "format-check"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode in (0, 1)
+    assert "format-check:" in result.stdout
+
+
+def test_ci_exposes_independent_required_quality_jobs() -> None:
+    workflow = (PROJECT_ROOT / ".github/workflows/quality.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "format:" in workflow
+    assert "lint:" in workflow
+    assert "typecheck:" in workflow
+    assert "test:" in workflow
+    assert "security:" in workflow
+    assert "container:" in workflow
+    assert "make format-check" in workflow
+    assert "make quality" not in workflow
+
+
+def test_ci_jobs_use_explicit_minimum_permissions_and_stable_names() -> None:
+    workflow = (PROJECT_ROOT / ".github/workflows/quality.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "permissions:\n  contents: read" in workflow
+    assert "name: Format" in workflow
+    assert "name: Lint" in workflow
+    assert "name: Type check" in workflow
+    assert "name: Tests" in workflow
+    assert "name: Security" in workflow
+    assert "name: Smoke container" in workflow
+    assert "timeout-minutes:" in workflow
+    assert "cancel-in-progress: true" in workflow
+    assert "needs: [format, lint, typecheck, test, security]" in workflow
+    assert "uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683" in workflow
+    assert (
+        "uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86" in workflow
+    )
+    assert (
+        "uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38"
+        in workflow
+    )

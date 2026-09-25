@@ -11,13 +11,16 @@ TRIVY ?= trivy
 DOCKER ?= docker
 SMOKE_IMAGE ?= ai-sentinel-smoke:security-scan
 
-.PHONY: bootstrap format lint typecheck test sast sca secrets container-check quality
+.PHONY: bootstrap format format-check lint typecheck test sast sca secrets container-check quality
 
 bootstrap:
 	$(UV) sync --all-packages --locked
 
 format:
 	$(RUFF) format .
+
+format-check:
+	$(RUFF) format --check .
 
 lint:
 	$(RUFF) check .
@@ -52,7 +55,7 @@ container-check:
 
 quality:
 	$(UV) lock --check
-	$(RUFF) format --check .
+	$(MAKE) format-check
 	$(RUFF) check .
 	$(MYPY)
 	$(PYTEST) -q --cov=ai_sentinel_smoke --cov-fail-under=80
