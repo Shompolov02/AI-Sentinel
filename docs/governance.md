@@ -26,6 +26,15 @@ source control so it can be audited when GitHub settings are applied.
 All changes use the pull request template, link an issue, pass required checks,
 and receive an independent review. Changes to CI, security policy, dependency
 manifests, or container baselines require the corresponding CODEOWNER review.
+
+## Dependency updates
+
+Dependabot checks Python dependencies, GitHub Actions, and the smoke container
+base independently each week. It opens small pull requests and does not merge
+them automatically. Every update pull request uses the normal pull request CI,
+including format, lint, type checking, tests, SAST, SCA, secret scanning,
+container checks, and SBOM generation where applicable. Branch protection keeps
+the required checks and CODEOWNERS review mandatory before merge.
 Do not merge with an open failing check or an expired exception.
 
 ## Commits and releases
