@@ -16,7 +16,7 @@ members = ["packages/smoke"]
 dev = [
     "mypy>=1.11,<2",
     "pytest>=9.0.3,<10",
-    "pytest-cov>=5,<6",
+    "pytest-cov>=5,<8",
     "ruff>=0.6,<1",
 ]
 
