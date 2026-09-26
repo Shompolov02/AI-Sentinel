@@ -90,7 +90,7 @@ jobs:
       - run: make test
       - name: Upload test reports
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: test-reports-${{ github.sha }}-py${{ matrix.python-version }}
           path: |
@@ -124,7 +124,7 @@ jobs:
       - run: make sast sca secrets security-exceptions
       - name: Upload security reports
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: security-reports-${{ github.sha }}
           path: |
@@ -160,7 +160,7 @@ jobs:
         run: make sbom
       - name: Upload container reports and SBOM
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: container-reports-${{ github.sha }}
           path: |
