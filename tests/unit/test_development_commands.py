@@ -92,6 +92,19 @@ def test_ci_tests_the_supported_minimum_python_version() -> None:
     assert 'python-version: ["3.10", "3.11"]' in workflow
 
 
+def test_dependabot_separates_dependency_ecosystems_without_automerging() -> None:
+    config = (PROJECT_ROOT / ".github/dependabot.yml").read_text(encoding="utf-8")
+
+    assert "version: 2" in config
+    assert "package-ecosystem: pip" in config
+    assert "package-ecosystem: github-actions" in config
+    assert "package-ecosystem: docker" in config
+    assert config.count('directory: "/"') == 2
+    assert 'directory: "/infrastructure/docker"' in config
+    assert "open-pull-requests-limit: 5" in config
+    assert "automerge" not in config.lower()
+
+
 def test_quality_uses_a_nonzero_coverage_gate() -> None:
     makefile = (PROJECT_ROOT / "Makefile").read_text(encoding="utf-8")
     assert "--cov-fail-under=80" in makefile
