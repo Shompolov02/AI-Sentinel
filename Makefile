@@ -62,6 +62,7 @@ container-check: smoke-image
 	@command -v trivy >/dev/null || (echo "container-check requires trivy" >&2; exit 1)
 	@command -v docker >/dev/null || (echo "container-check requires docker" >&2; exit 1)
 	docker compose -f infrastructure/compose/smoke.yaml config --quiet
+	docker compose -f deploy/docker-compose.yml config > /dev/null
 	$(TRIVY) fs --scanners vuln --format json --output $(REPORT_DIR)/trivy-fs.json --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed .
 	$(TRIVY) config --format json --output $(REPORT_DIR)/trivy-config.json --exit-code 1 --severity HIGH,CRITICAL infrastructure
 	@set +e; $(TRIVY) config --exit-code 42 --severity HIGH,CRITICAL tests/security/fixtures/container-policy-unsafe/Dockerfile >/dev/null 2>&1; scan_exit=$$?; set -e; test $$scan_exit -eq 42 || (echo "Trivy unsafe container-policy fixture was not rejected (exit $$scan_exit)" >&2; exit 1)
