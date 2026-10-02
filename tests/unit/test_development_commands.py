@@ -115,6 +115,38 @@ def test_container_check_validates_the_normalized_compose_model() -> None:
     assert (
         "docker compose -f infrastructure/compose/smoke.yaml config --quiet" in makefile
     )
+    assert "docker compose -f deploy/docker-compose.yml config > /dev/null" in makefile
+    quality = makefile.split("\nquality:\n", maxsplit=1)[1]
+    assert "container-check" in quality
+    compose_file = PROJECT_ROOT / "deploy/docker-compose.yml"
+    assert compose_file.is_file()
+
+
+def test_honeynet_runtime_decisions_are_documented_and_canonical() -> None:
+    specification = (
+        PROJECT_ROOT / "docs/architecture/decisions/phase-1-runtime-baseline.md"
+    ).read_text(encoding="utf-8")
+    makefile = (PROJECT_ROOT / "Makefile").read_text(encoding="utf-8")
+    env_example = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
+
+    required_contracts = (
+        "deploy/docker-compose.yml",
+        "cowrie/cowrie:3.0.15@sha256:fc57120d88c2bfb5817f63f6c132ce5c2969b641c2f1ac67887652b6f294148d",
+        "444",
+        "/health",
+        '"error"',
+        '"correlation_id"',
+        '"status"',
+        "X-Request-ID",
+        "Pytest",
+        "Docker CLI",
+    )
+    for contract in required_contracts:
+        assert contract in specification
+
+    assert "deploy/docker-compose.yml config > /dev/null" in makefile
+    assert "COWRIE_IMAGE=" in env_example
+    assert "BIND_ADDRESS=" in env_example
 
 
 def test_security_gates_use_pinned_scanners_and_fail_closed() -> None:
