@@ -1,5 +1,9 @@
 FROM python:3.11-slim-bookworm@sha256:a36c24f9cbdf4fd0f52d67f0823eeac19c2028c637cecc392d97f980d4fec56b AS builder
 
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /src
 COPY packages/smoke/src/ai_sentinel_smoke /src/ai_sentinel_smoke
 RUN python -m compileall -q --invalidation-mode checked-hash /src/ai_sentinel_smoke \
@@ -7,6 +11,10 @@ RUN python -m compileall -q --invalidation-mode checked-hash /src/ai_sentinel_sm
     && cp -a /src/ai_sentinel_smoke /opt/smoke/
 
 FROM python:3.11-slim-bookworm@sha256:a36c24f9cbdf4fd0f52d67f0823eeac19c2028c637cecc392d97f980d4fec56b AS runtime
+
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
 
 LABEL org.opencontainers.image.title="AI-Sentinel smoke" \
       org.opencontainers.image.description="Non-privileged container baseline for AI-Sentinel"
