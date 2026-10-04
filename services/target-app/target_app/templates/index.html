@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#080d17">
+    <title>Sentinel // Target Operations</title>
+    <link rel="stylesheet" href="/static/css/dashboard.css">
+    <script src="/static/js/dashboard.js" defer></script>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="Sentinel home"><span class="brand-mark">S</span><span> SENTINEL<span class="brand-dim"> / TARGET OPS</span></span></a>
+        <div class="top-status"><span class="pulse"></span> LAB NODE ONLINE <span class="divider">|</span> SECURE SANDBOX</div>
+      </header>
+      <main>
+        <div class="warning"><span class="warning-icon">⚠</span><strong>LABORATORY ENVIRONMENT — INTENTIONALLY VULNERABLE TARGET</strong><span class="warning-tag">AUTHORIZED TESTING ONLY</span></div>
+        <section class="hero">
+          <div class="eyebrow"><span class="eyebrow-line"></span> THREAT RESEARCH CONSOLE <span class="eyebrow-line"></span></div>
+          <h1>Target <span>Operations</span></h1>
+          <p>Controlled interaction surface for security assessment and event analysis.</p>
+          <div class="hero-meta"><span>ENVIRONMENT <b>ISOLATED LAB</b></span><span>SESSION <b>{{ correlation_id[:8] }}</b></span><span>API <b>v1.0</b></span></div>
+        </section>
+        <section class="grid" aria-label="Target operations">
+          <article class="card" style="--accent:#42d9f5">
+            <div class="card-head"><span class="card-icon">⌁</span><span class="card-index">01 / NETWORK</span><span class="card-state">READY</span></div>
+            <h2>Network Diagnostics</h2><p class="card-copy">Inspect a target host in the isolated lab network.</p>
+            <form data-api-form action="/api/diagnostics/ping" method="post">
+              <label for="target">TARGET HOST</label><div class="input-wrap"><span class="input-prefix">&gt;_</span><input id="target" name="target" maxlength="4096" placeholder="e.g. 192.168.1.10" required></div>
+              <button type="submit">RUN DIAGNOSTIC <span>→</span></button>
+            </form><pre class="result" aria-live="polite">Awaiting input<span class="cursor">_</span></pre>
+          </article>
+          <article class="card" style="--accent:#a88bff">
+            <div class="card-head"><span class="card-icon">⌕</span><span class="card-index">02 / INTELLIGENCE</span><span class="card-state">READY</span></div>
+            <h2>Asset Catalog Search</h2><p class="card-copy">Query the simulated asset inventory.</p>
+            <form data-api-form action="/api/search" method="post">
+              <label for="query">SEARCH QUERY</label><div class="input-wrap"><span class="input-prefix">&gt;_</span><input id="query" name="query" maxlength="4096" placeholder="e.g. exposed services" required></div>
+              <button type="submit">SEARCH CATALOG <span>→</span></button>
+            </form><pre class="result" aria-live="polite">Awaiting input<span class="cursor">_</span></pre>
+          </article>
+          <article class="card" style="--accent:#48e0a4">
+            <div class="card-head"><span class="card-icon">⌬</span><span class="card-index">03 / AI ANALYSIS</span><span class="card-state">READY</span></div>
+            <h2>AI Security Event Intake</h2><p class="card-copy">Submit a security event for controlled analysis.</p>
+            <form data-api-form action="/api/analyze" method="post">
+              <label for="text">EVENT DESCRIPTION</label><div class="input-wrap"><span class="input-prefix">&gt;_</span><input id="text" name="text" maxlength="4096" placeholder="Describe a security event" required></div>
+              <button type="submit">SUBMIT FOR ANALYSIS <span>→</span></button>
+            </form><pre class="result" aria-live="polite">Awaiting input<span class="cursor">_</span></pre>
+          </article>
+        </section>
+        <footer><span>AI-SENTINEL <b>LABORATORY</b></span><span>ALL ACTIVITY IS LOGGED <i>•</i> CONTROLLED ENVIRONMENT</span><span>© 2026</span></footer>
+      </main>
+    </div>
+  </body>
+</html>
