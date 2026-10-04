@@ -1,9 +1,16 @@
 services:
   nginx:
-    image: nginx:1.27-alpine
+    image: nginxinc/nginx-unprivileged:1.27-alpine
     restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: "0.25"
+    mem_limit: 128m
+    pids_limit: 50
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:8080:80"
+    volumes:
+      - nginx-logs:/var/log/nginx
     depends_on:
       target-app:
         condition: service_healthy
@@ -19,8 +26,18 @@ services:
   target-app:
     image: bkimminich/juice-shop:v17.1.1
     restart: unless-stopped
+    user: "10001:10001"
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: "0.5"
+    mem_limit: 512m
+    pids_limit: 100
     expose:
       - "3000"
+    volumes:
+      - target-app-data:/app/data
     healthcheck:
       test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\""]
       interval: 30s
@@ -33,9 +50,17 @@ services:
   cowrie:
     image: cowrie/cowrie:3.0.15@sha256:fc57120d88c2bfb5817f63f6c132ce5c2969b641c2f1ac67887652b6f294148d
     restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: "0.5"
+    mem_limit: 512m
+    pids_limit: 100
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:2222:2222/tcp"
       - "${BIND_ADDRESS:-127.0.0.1}:2223:2223/tcp"
+    volumes:
+      - cowrie-logs:/cowrie/cowrie-git/var/log/cowrie
+      - cowrie-downloads:/cowrie/cowrie-git/var/lib/cowrie/downloads
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import socket; s=socket.create_connection(('127.0.0.1', 2222), 3); s.close()\""]
       interval: 30s
@@ -44,6 +69,12 @@ services:
       start_period: 30s
     networks:
       - honeynet
+
+volumes:
+  target-app-data:
+  nginx-logs:
+  cowrie-logs:
+  cowrie-downloads:
 
 networks:
   prod_net:
