@@ -1,7 +1,61 @@
-version: "3.9"
+services:
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:8080:80"
+    depends_on:
+      target-app:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - prod_net
+
+  target-app:
+    image: bkimminich/juice-shop:v17.1.1
+    restart: unless-stopped
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - prod_net
+
+  cowrie:
+    image: cowrie/cowrie:3.0.15@sha256:fc57120d88c2bfb5817f63f6c132ce5c2969b641c2f1ac67887652b6f294148d
+    restart: unless-stopped
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:2222:2222/tcp"
+      - "${BIND_ADDRESS:-127.0.0.1}:2223:2223/tcp"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket; s=socket.create_connection(('127.0.0.1', 2222), 3); s.close()\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - honeynet
 
 networks:
   prod_net:
     name: ai-sentinel-prod-net
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: ${PROD_NET_SUBNET:-172.30.10.0/24}
   honeynet:
     name: ai-sentinel-honeynet
+    internal: true
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: ${HONEYNET_SUBNET:-172.30.20.0/24}
