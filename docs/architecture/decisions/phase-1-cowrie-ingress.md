@@ -19,6 +19,9 @@ The Cowrie container belongs only to `honeynet`, which remains
 container publishes SSH and Telnet on `${BIND_ADDRESS:-127.0.0.1}` using host
 ports `2222` and `2223` by default. It joins `honeynet` and the dedicated
 non-internal `cowrie_ingress` bridge; it never joins `prod_net`.
+The ingress bridge has the explicit default IPv4 CIDR `172.30.30.0/24`,
+separate from `prod_net` (`172.30.10.0/24`) and `honeynet`
+(`172.30.20.0/24`). Operators may override the CIDRs for local conflicts.
 
 The ingress uses the existing non-root Nginx image with a separate stream
 configuration containing only two TCP proxy targets: `cowrie:2222` and
@@ -27,6 +30,9 @@ address. Cowrie listens for PROXY headers on those two ports. The sidecar has
 a read-only root filesystem, a small tmpfs, dropped capabilities,
 `no-new-privileges`, and resource limits. Nginx's HTTP service remains only on
 `prod_net`; neither Target App nor Cowrie joins `cowrie_ingress`.
+Compose explicitly selects UID `101` for both Nginx services and UID/GID
+`999:999` for Cowrie, matching the accepted images so static policy checks can
+verify non-root execution from the normalized configuration.
 
 ## Consequences and verification
 
