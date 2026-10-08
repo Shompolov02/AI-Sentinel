@@ -8,7 +8,7 @@ document.querySelectorAll("[data-api-form]").forEach((form) => {
     const field = form.querySelector("input");
     button.disabled = true;
     result.className = "result";
-    result.textContent = "Request in progress…";
+    result.textContent = "Запрос выполняется…";
     try {
       const response = await fetch(form.action, {
         method: "POST",
@@ -19,7 +19,7 @@ document.querySelectorAll("[data-api-form]").forEach((form) => {
       result.textContent = JSON.stringify(body, null, 2);
       result.classList.add(response.ok ? "success" : "error");
     } catch {
-      result.textContent = "Request failed. Check the service connection.";
+      result.textContent = "Ошибка запроса. Проверьте подключение к сервису.";
       result.classList.add("error");
     } finally {
       button.disabled = false;

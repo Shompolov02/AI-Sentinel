@@ -5,9 +5,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 COPY services/target-app/requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir --disable-pip-version-check -r requirements.txt \
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y iputils-ping \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir --disable-pip-version-check -r requirements.txt \
     && addgroup --system --gid 10001 app \
-    && adduser --system --uid 10001 --ingroup app --no-create-home app
+    && adduser --system --uid 10001 --ingroup app --no-create-home app \
+    && mkdir -p /app/target_app/data \
+    && chown -R 10001:10001 /app/target_app/data
 COPY --chown=10001:10001 services/target-app/target_app ./target_app
 USER 10001:10001
 EXPOSE 8000

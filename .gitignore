@@ -86,3 +86,4 @@ temp/
 !*.tfvars.example
 docker-data/
 volumes/
+services/target-app/target_app/data/
