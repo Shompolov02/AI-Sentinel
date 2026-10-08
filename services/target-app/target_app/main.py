@@ -1,20 +1,25 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import sqlite3
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+
+from target_app.surfaces import PingTimedOut, run_ping, search_assets
 
 BASE_DIR = Path(__file__).resolve().parent
 MAX_INPUT_LENGTH = 4096
@@ -40,6 +45,10 @@ class JsonFormatter(logging.Formatter):
             "status": getattr(record, "status", None),
             "duration_ms": getattr(record, "duration_ms", None),
         }
+        if hasattr(record, "event"):
+            payload["event"] = record.event
+        if hasattr(record, "text"):
+            payload["text"] = record.text
         return json.dumps(payload, separators=(",", ":"))
 
 
@@ -109,18 +118,77 @@ class AnalyzeRequest(InputModel):
     text: Annotated[str, Field(min_length=1, max_length=MAX_INPUT_LENGTH)]
 
 
+class Asset(BaseModel):
+    id: int
+    hostname: str
+    ip_address: str
+    status: str
+    description: str
+
+
+class SearchResult(BaseModel):
+    status: str
+    query: str
+    results: list[Asset]
+    correlation_id: str
+
+
+class PingResult(BaseModel):
+    status: str
+    target: str
+    stdout: str
+    stderr: str
+    exit_code: int
+    truncated: bool
+    correlation_id: str
+
+
+class AnalyzeResult(BaseModel):
+    status: str
+    correlation_id: str
+
+
 def correlated(payload: dict[str, Any], request: Request) -> dict[str, Any]:
     return {**payload, "correlation_id": request.state.correlation_id}
 
 
-app = FastAPI(
-    title="AI-Sentinel Target App",
-    description="Intentionally vulnerable target for controlled laboratory testing.",
+class TargetApp(FastAPI):
+    def openapi(self) -> dict[str, Any]:
+        if self.openapi_schema is not None:
+            return self.openapi_schema
+        schema = get_openapi(
+            title=self.title,
+            version=self.version,
+            description=self.description,
+            routes=self.routes,
+        )
+        for path in schema["paths"].values():
+            for operation in path.values():
+                operation.get("responses", {}).pop("422", None)
+        self.openapi_schema = schema
+        return schema
+
+
+app = TargetApp(
+    title="AI-Sentinel — целевое приложение",
+    description="Учебное уязвимое приложение для лабораторных испытаний.",
     version="1.0.0",
+    docs_url=None,
+    redoc_url=None,
 )
 app.add_middleware(SecurityAndCorrelationMiddleware)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
+
+
+@app.get("/docs", include_in_schema=False)
+async def swagger_docs(request: Request) -> Response:
+    return templates.TemplateResponse(request=request, name="docs.html")
+
+
+@app.get("/redoc", include_in_schema=False)
+async def redoc_docs(request: Request) -> Response:
+    return templates.TemplateResponse(request=request, name="redoc.html")
 
 
 @app.exception_handler(RequestValidationError)
@@ -144,23 +212,93 @@ async def dashboard(request: Request) -> Response:
     )
 
 
-@app.get("/health")
+@app.get("/health", summary="Проверка состояния")
 async def health(request: Request) -> dict[str, str]:
     return correlated({"status": "ok"}, request)
 
 
-@app.post("/api/diagnostics/ping")
-async def diagnostics_ping(payload: PingRequest, request: Request) -> dict[str, str]:
-    return correlated({"status": "accepted", "target": payload.target}, request)
-
-
-@app.post("/api/search")
-async def search(payload: SearchRequest, request: Request) -> dict[str, str]:
-    return correlated(
-        {"status": "ok", "query": payload.query, "results": "[]"}, request
+@app.post(
+    "/api/diagnostics/ping",
+    summary="Сетевая диагностика",
+    response_model=PingResult,
+    responses={
+        400: {"description": "Некорректный запрос"},
+        504: {"description": "Превышено время выполнения"},
+    },
+)
+async def diagnostics_ping(
+    payload: PingRequest, request: Request
+) -> PingResult | JSONResponse:
+    try:
+        output = await asyncio.to_thread(run_ping, payload.target)
+    except PingTimedOut:
+        return error_response(request.state.correlation_id, 504)
+    return PingResult(
+        status="completed",
+        target=payload.target,
+        stdout=output.stdout,
+        stderr=output.stderr,
+        exit_code=output.exit_code,
+        truncated=output.truncated,
+        correlation_id=request.state.correlation_id,
     )
 
 
-@app.post("/api/analyze")
-async def analyze(payload: AnalyzeRequest, request: Request) -> dict[str, str]:
-    return correlated({"status": "received", "text": payload.text}, request)
+def search_response(query: str, request: Request) -> SearchResult | JSONResponse:
+    normalized = query.strip()
+    if not normalized:
+        return error_response(request.state.correlation_id, 400)
+    try:
+        assets = search_assets(normalized)
+    except sqlite3.OperationalError:
+        return error_response(request.state.correlation_id, 400)
+    return SearchResult(
+        status="ok",
+        query=normalized,
+        results=[Asset.model_validate(asset) for asset in assets],
+        correlation_id=request.state.correlation_id,
+    )
+
+
+@app.get(
+    "/search",
+    summary="Поиск учебных активов",
+    response_model=SearchResult,
+    responses={400: {"description": "Некорректный запрос"}},
+)
+async def search_page(
+    request: Request,
+    q: Annotated[str, Query(min_length=1, max_length=MAX_INPUT_LENGTH)],
+) -> SearchResult | JSONResponse:
+    return search_response(q, request)
+
+
+@app.post(
+    "/api/search",
+    summary="Поиск активов",
+    response_model=SearchResult,
+    responses={400: {"description": "Некорректный запрос"}},
+)
+async def search(
+    payload: SearchRequest, request: Request
+) -> SearchResult | JSONResponse:
+    return search_response(payload.query, request)
+
+
+@app.post(
+    "/api/analyze",
+    summary="Приём события безопасности",
+    response_model=AnalyzeResult,
+    responses={400: {"description": "Некорректный запрос"}},
+)
+async def analyze(payload: AnalyzeRequest, request: Request) -> AnalyzeResult:
+    logger.info(
+        "prompt input received",
+        extra={
+            "event": "PROMPT_INPUT_RECEIVED",
+            "status": "RECEIVED",
+            "correlation_id": request.state.correlation_id,
+            "text": payload.text,
+        },
+    )
+    return AnalyzeResult(status="RECEIVED", correlation_id=request.state.correlation_id)

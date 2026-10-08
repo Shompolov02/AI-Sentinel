@@ -1,0 +1,8 @@
+finding_id: "no-shell-true-in-security-gates; python.lang.security.audit.subprocess-shell-true.subprocess-shell-true; Ruff S608"
+secops_owner: "@Shompolov02"
+status: proposed
+justification: "Issue #23 requires intentionally injectable command and SQL queries in a synthetic laboratory target. These patterns are required research fixtures, not production examples."
+scope: "Only services/target-app/target_app/surfaces.py:run_ping and search_assets"
+compensating_control: "Synthetic assets only; no host port, Docker socket or host mounts; UID 10001, read-only rootfs, no extra capabilities; 5-second command deadline, 4 KiB combined output and 50-row search response cap. Nginx ingress hardening is tracked in #24."
+expires_on: 2027-01-31
+follow_up: "https://github.com/Shompolov02/AI-Sentinel/issues/34"
