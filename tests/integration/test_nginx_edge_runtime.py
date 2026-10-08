@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import shutil
 import socket
 import subprocess
+import sys
 import time
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -18,6 +21,32 @@ PROJECT_ROOT = Path(__file__).parents[2]
 COMPOSE_FILE = PROJECT_ROOT / "deploy/docker-compose.yml"
 ASKPASS = PROJECT_ROOT / "tests/integration/fixtures/ssh_askpass"
 NO_TELNET = PROJECT_ROOT / "tests/integration/fixtures/cowrie-no-telnet.yml"
+PROBE_SCRIPT = """
+import json, signal, socket, sys, time
+
+def deadline(_signum, _frame):
+    raise TimeoutError('probe deadline exceeded')
+
+mode, address, port = sys.argv[1:4]
+signal.signal(signal.SIGALRM, deadline)
+started = time.monotonic()
+signal.setitimer(signal.ITIMER_REAL, 1.8)
+try:
+    if mode == 'dns':
+        socket.getaddrinfo(address, None, family=socket.AF_INET)
+    else:
+        socket.create_connection((address, int(port)), timeout=1.8).close()
+    result = 'reachable'
+except socket.gaierror as error:
+    result = 'dns_error:' + str(error.errno)
+except TimeoutError:
+    result = 'timeout'
+except OSError as error:
+    result = 'os_error:' + str(error.errno)
+finally:
+    signal.setitimer(signal.ITIMER_REAL, 0)
+print(json.dumps({'result': result, 'elapsed': time.monotonic() - started}))
+"""
 
 
 @dataclass(frozen=True)
@@ -41,9 +70,112 @@ class Runtime:
             check=False,
         )
 
+    def docker(self, *args: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(  # noqa: S603
+            [self.command[0], *args],
+            cwd=PROJECT_ROOT,
+            env=self.environment,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+
+
+def _service_inspect(runtime: Runtime, service: str) -> dict[str, Any]:
+    container = runtime.compose("ps", "-q", service)
+    assert container.returncode == 0 and container.stdout.strip(), (
+        f"{service}: missing container: {container.stderr}"
+    )
+    inspected = runtime.docker("inspect", container.stdout.strip())
+    assert inspected.returncode == 0, f"{service}: {inspected.stderr}"
+    return cast(dict[str, Any], json.loads(inspected.stdout)[0])
+
+
+def _failure_diagnostics(runtime: Runtime) -> str:
+    status = runtime.compose("ps", "--all")
+    logs = runtime.compose("logs", "--tail", "100")
+    return (
+        f"Compose status:\n{status.stdout}{status.stderr}\n"
+        f"Logs:\n{logs.stdout}{logs.stderr}"
+    )
+
+
+def _network_address(runtime: Runtime, service: str, network: str) -> tuple[str, str]:
+    details = _service_inspect(runtime, service)
+    networks = details["NetworkSettings"]["Networks"]
+    matches = [
+        value for name, value in networks.items() if name.endswith("_" + network)
+    ]
+    assert len(matches) == 1, f"{service}: expected one {network} attachment"
+    attachment = matches[0]
+    address = attachment["IPAddress"]
+    cidr = ipaddress.ip_network(f"{address}/{attachment['IPPrefixLen']}", strict=False)
+    assert address and isinstance(cidr, ipaddress.IPv4Network)
+    return address, str(cidr)
+
+
+def _container_python(service: str) -> str:
+    return "/cowrie/cowrie-env/bin/python3" if service == "cowrie" else "python"
+
+
+def _network_probe(
+    runtime: Runtime,
+    service: str,
+    direction: str,
+    mode: str,
+    address: str,
+    port: int = 0,
+) -> None:
+    result = runtime.compose(
+        "exec",
+        "-T",
+        service,
+        _container_python(service),
+        "-c",
+        PROBE_SCRIPT,
+        mode,
+        address,
+        str(port),
+        timeout=5,
+    )
+    assert result.returncode == 0, (
+        f"{direction}: {mode} {address}:{port}: probe failed: "
+        f"{result.stdout}{result.stderr}"
+    )
+    outcome = json.loads(result.stdout)
+    assert outcome["elapsed"] <= 2, (
+        f"{direction}: {mode} {address}:{port} exceeded 2 s: {outcome}"
+    )
+    expected = (
+        outcome["result"].startswith("dns_error:")
+        if mode == "dns"
+        else outcome["result"] in {"timeout", "os_error:101", "os_error:113"}
+    )
+    assert expected, (
+        f"{direction}: unexpectedly reached {mode} {address}:{port}: {outcome}"
+    )
+
+
+def _container_routes(runtime: Runtime, service: str) -> list[ipaddress.IPv4Network]:
+    script = "from pathlib import Path; print(Path('/proc/net/route').read_text())"
+    result = runtime.compose(
+        "exec", "-T", service, _container_python(service), "-c", script
+    )
+    assert result.returncode == 0, f"{service}: cannot read routes: {result.stderr}"
+    routes = []
+    for line in result.stdout.splitlines()[1:]:
+        fields = line.split()
+        if not fields:
+            continue
+        destination = int.from_bytes(bytes.fromhex(fields[1]), "little")
+        mask = int.from_bytes(bytes.fromhex(fields[7]), "little")
+        routes.append(ipaddress.IPv4Network((destination & mask, mask.bit_count())))
+    return routes
+
 
 @pytest.fixture(scope="module")
-def runtime() -> Iterator[Runtime]:
+def runtime(request: pytest.FixtureRequest) -> Iterator[Runtime]:
     docker = shutil.which("docker")
     available = (
         docker is not None
@@ -57,6 +189,16 @@ def runtime() -> Iterator[Runtime]:
             pytest.fail("Docker Engine and Compose are required for runtime acceptance")
         pytest.skip("Docker Engine is unavailable")
     assert docker is not None
+    compose_plugin = subprocess.run(  # noqa: S603
+        [docker, "compose", "version"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert compose_plugin.returncode == 0, (
+        f"Docker Compose plugin is required: {compose_plugin.stderr}"
+    )
 
     ports: list[int] = []
     for _ in range(3):
@@ -65,7 +207,7 @@ def runtime() -> Iterator[Runtime]:
             ports.append(sock.getsockname()[1])
     http_port, ssh_port, telnet_port = ports
 
-    project = f"aisentinel25-{uuid.uuid4().hex[:8]}"
+    project = f"aisentinel27-{uuid.uuid4().hex[:8]}"
     environment = {
         **os.environ,
         "BIND_ADDRESS": "127.0.0.1",
@@ -87,11 +229,106 @@ def runtime() -> Iterator[Runtime]:
             else "--build"
         )
         started = instance.compose("up", "-d", build_flag, "--wait", timeout=360)
-        assert started.returncode == 0, started.stdout + started.stderr
+        assert started.returncode == 0, (
+            started.stdout + started.stderr + "\n" + _failure_diagnostics(instance)
+        )
+        for service in (
+            "http-ingress",
+            "nginx",
+            "target-app",
+            "cowrie-ingress",
+            "cowrie",
+        ):
+            details = _service_inspect(instance, service)
+            health = details["State"]["Health"]["Status"]
+            assert health == "healthy", (
+                f"{service}: expected healthy, got {health}\n"
+                + _failure_diagnostics(instance)
+            )
+        failed_before = request.session.testsfailed
         yield instance
     finally:
+        if request.session.testsfailed > locals().get("failed_before", 0):
+            print(_failure_diagnostics(instance), file=sys.stderr)
         stopped = instance.compose("down", "--volumes", "--remove-orphans", timeout=120)
-        assert stopped.returncode == 0, stopped.stdout + stopped.stderr
+        assert stopped.returncode == 0, (
+            "Compose cleanup failed:\n"
+            + stopped.stdout
+            + stopped.stderr
+            + "\n"
+            + _failure_diagnostics(instance)
+        )
+
+
+@pytest.mark.runtime
+def test_all_services_are_healthy_and_only_ingress_has_host_ports(
+    runtime: Runtime,
+) -> None:
+    expected = {
+        "http-ingress": {"8080/tcp"},
+        "cowrie-ingress": {"2222/tcp", "2223/tcp"},
+        "nginx": set(),
+        "target-app": set(),
+        "cowrie": set(),
+    }
+    for service, expected_ports in expected.items():
+        details = _service_inspect(runtime, service)
+        assert details["State"]["Health"]["Status"] == "healthy", service
+        bindings = details["HostConfig"]["PortBindings"] or {}
+        assert set(bindings) == expected_ports, f"{service}: {bindings}"
+        for port_bindings in bindings.values():
+            assert all(binding["HostIp"] == "127.0.0.1" for binding in port_bindings)
+
+
+@pytest.mark.runtime
+def test_honeynet_cannot_resolve_or_reach_http_zone(runtime: Runtime) -> None:
+    nginx_ip, prod_cidr = _network_address(runtime, "nginx", "prod_net")
+    target_ip, _ = _network_address(runtime, "target-app", "prod_net")
+    direction = "honeynet -> prod_net"
+    for name in ("nginx", "target-app"):
+        _network_probe(runtime, "cowrie", direction, "dns", name)
+    for address, port in ((nginx_ip, 8080), (target_ip, 8000)):
+        _network_probe(runtime, "cowrie", direction, "tcp", address, port)
+    forbidden = ipaddress.IPv4Network(prod_cidr)
+    assert not any(
+        route.overlaps(forbidden) for route in _container_routes(runtime, "cowrie")
+    ), f"{direction}: route to forbidden subnet {prod_cidr}"
+
+
+@pytest.mark.runtime
+def test_target_app_cannot_resolve_or_reach_honeynet(runtime: Runtime) -> None:
+    cowrie_ip, honeynet_cidr = _network_address(runtime, "cowrie", "honeynet")
+    ingress_ip, _ = _network_address(runtime, "cowrie-ingress", "honeynet")
+    direction = "prod_net -> honeynet"
+    for name in ("cowrie", "cowrie-ingress"):
+        _network_probe(runtime, "target-app", direction, "dns", name)
+    for address, port in (
+        (cowrie_ip, 2222),
+        (cowrie_ip, 2223),
+        (ingress_ip, 2222),
+        (ingress_ip, 2223),
+    ):
+        _network_probe(runtime, "target-app", direction, "tcp", address, port)
+    forbidden = ipaddress.IPv4Network(honeynet_cidr)
+    assert not any(
+        route.overlaps(forbidden) for route in _container_routes(runtime, "target-app")
+    ), f"{direction}: route to forbidden subnet {honeynet_cidr}"
+
+
+@pytest.mark.runtime
+def test_vulnerable_workloads_have_no_host_or_external_route(runtime: Runtime) -> None:
+    inspected = runtime.docker("network", "inspect", "bridge")
+    assert inspected.returncode == 0, inspected.stderr
+    host_gateway = json.loads(inspected.stdout)[0]["IPAM"]["Config"][0]["Gateway"]
+    assert host_gateway
+    for service in ("target-app", "cowrie"):
+        direction = f"{service} -> host/external"
+        routes = _container_routes(runtime, service)
+        assert all(route.prefixlen > 0 for route in routes), (
+            f"{direction}: unexpected default route {routes}"
+        )
+        _network_probe(runtime, service, direction, "tcp", host_gateway, 80)
+        _network_probe(runtime, service, direction, "tcp", "198.51.100.1", 443)
 
 
 @pytest.mark.runtime
@@ -158,7 +395,8 @@ def test_edge_overwrites_spoofed_headers_and_correlates_logs(runtime: Runtime) -
     assert matches[-1]["request_uri"] == "/health"
     assert matches[-1]["request_method"] == "GET"
     assert matches[-1]["http_x_forwarded_for"] == spoofed_ip
-    assert matches[-1]["remote_addr"] != spoofed_ip
+    ingress_backend_ip, _ = _network_address(runtime, "http-ingress", "http_edge")
+    assert matches[-1]["remote_addr"] not in (spoofed_ip, ingress_backend_ip)
     assert matches[-1]["time_iso8601"]
     assert matches[-1]["request_time"] >= 0
 
@@ -172,7 +410,53 @@ def test_edge_overwrites_spoofed_headers_and_correlates_logs(runtime: Runtime) -
         entry for entry in app_entries if entry.get("correlation_id") == request_id
     ]
     assert app_matches
-    assert app_matches[-1]["client_ip"] != spoofed_ip
+    assert app_matches[-1]["client_ip"] == matches[-1]["remote_addr"]
+
+
+@pytest.mark.runtime
+def test_http_logs_and_sqlite_survive_service_recreation(runtime: Runtime) -> None:
+    marker = f"runtime-persist-{uuid.uuid4().hex[:8]}"
+    row_id = 1_000_000 + int(uuid.uuid4().hex[:6], 16)
+    with httpx.Client(base_url=runtime.base_url, timeout=5, trust_env=False) as client:
+        assert client.post("/api/search", json={"query": "srv-web"}).status_code == 200
+        response = client.get(f"/health?marker={marker}")
+        assert response.status_code == 200
+
+    insert = runtime.compose(
+        "exec",
+        "-T",
+        "target-app",
+        "python",
+        "-c",
+        "import sqlite3,sys; from target_app.surfaces import asset_db_path; "
+        "db=sqlite3.connect(asset_db_path()); "
+        "db.execute('INSERT INTO assets VALUES (?,?,?,?,?)', "
+        "(int(sys.argv[1]),sys.argv[2],'10.0.0.99','active','Synthetic marker')); "
+        "db.commit(); db.close()",
+        str(row_id),
+        marker,
+    )
+    assert insert.returncode == 0, insert.stderr
+    before = runtime.compose("exec", "-T", "nginx", "cat", "/var/log/nginx/access.log")
+    assert before.returncode == 0 and marker in before.stdout, before.stderr
+
+    recreated = runtime.compose(
+        "up",
+        "-d",
+        "--force-recreate",
+        "--wait",
+        "target-app",
+        "nginx",
+        "http-ingress",
+        timeout=180,
+    )
+    assert recreated.returncode == 0, recreated.stdout + recreated.stderr
+    after = runtime.compose("exec", "-T", "nginx", "cat", "/var/log/nginx/access.log")
+    assert after.returncode == 0 and marker in after.stdout, after.stderr
+    with httpx.Client(base_url=runtime.base_url, timeout=5, trust_env=False) as client:
+        search = client.post("/api/search", json={"query": marker})
+    assert search.status_code == 200
+    assert any(row["hostname"] == marker for row in search.json()["results"])
 
 
 @pytest.mark.runtime
@@ -237,6 +521,15 @@ def _recv_until(conn: socket.socket, expected: bytes) -> bytes:
     return data
 
 
+def _record_telnet_login(runtime: Runtime, username: str) -> None:
+    with socket.create_connection(("127.0.0.1", runtime.telnet_port), 3) as conn:
+        conn.settimeout(3)
+        assert b"login:" in _recv_until(conn, b"login:").lower()
+        conn.sendall(username.encode() + b"\r\n")
+        assert b"password:" in _recv_until(conn, b"password:").lower()
+        conn.sendall(b"lab-only-password\r\n")
+
+
 @pytest.mark.runtime
 def test_cowrie_health_does_not_create_fake_sessions(runtime: Runtime) -> None:
     events = _cowrie_events(runtime)
@@ -285,12 +578,7 @@ def test_cowrie_accepts_loopback_ssh_telnet_and_records_synthetic_logins(
     )
     assert ssh_result.returncode in (0, 255), ssh_result.stderr
 
-    with socket.create_connection(("127.0.0.1", runtime.telnet_port), 3) as conn:
-        conn.settimeout(3)
-        assert b"login:" in _recv_until(conn, b"login:").lower()
-        conn.sendall(b"synthetic-telnet\r\n")
-        assert b"password:" in _recv_until(conn, b"password:").lower()
-        conn.sendall(b"lab-only-password\r\n")
+    _record_telnet_login(runtime, "synthetic-telnet")
 
     for _ in range(20):
         events = _cowrie_events(runtime)
@@ -345,15 +633,21 @@ def test_cowrie_hardening_and_named_volumes_survive_recreation(
     assert details["HostConfig"]["CapDrop"] == ["ALL"]
     assert details["State"]["Health"]["Status"] == "healthy"
     mounts = details["Mounts"]
-    assert all(mount["Name"].startswith("aisentinel25-") for mount in mounts)
+    assert all(mount["Name"].startswith("aisentinel27-") for mount in mounts)
     assert {mount["Destination"] for mount in mounts} == {
         "/cowrie/cowrie-git/etc",
         "/cowrie/cowrie-git/var/log/cowrie",
         "/cowrie/cowrie-git/var/lib/cowrie",
         "/cowrie/cowrie-git/var/lib/cowrie/downloads",
     }
-    before = _cowrie_events(runtime)
-    assert before
+    marker_name = f"persist-{uuid.uuid4().hex[:8]}"
+    _record_telnet_login(runtime, marker_name)
+    for _ in range(20):
+        before = _cowrie_events(runtime)
+        if any(event.get("username") == marker_name for event in before):
+            break
+        time.sleep(0.2)
+    assert any(event.get("username") == marker_name for event in before)
     marker = runtime.compose(
         "exec",
         "-T",
@@ -361,7 +655,7 @@ def test_cowrie_hardening_and_named_volumes_survive_recreation(
         "/cowrie/cowrie-env/bin/python3",
         "-c",
         "from pathlib import Path; "
-        "Path('var/lib/cowrie/downloads/synthetic-marker').write_text('lab-only')",
+        f"Path('var/lib/cowrie/downloads/{marker_name}').write_text('lab-only')",
     )
     assert marker.returncode == 0, marker.stderr
 
@@ -370,8 +664,7 @@ def test_cowrie_hardening_and_named_volumes_survive_recreation(
     )
     assert recreated.returncode == 0, recreated.stdout + recreated.stderr
     after = _cowrie_events(runtime)
-    assert before[0] in after
-    assert any(event.get("username") == "synthetic-ssh" for event in after)
+    assert any(event.get("username") == marker_name for event in after)
     stored = runtime.compose(
         "exec",
         "-T",
@@ -379,7 +672,7 @@ def test_cowrie_hardening_and_named_volumes_survive_recreation(
         "/cowrie/cowrie-env/bin/python3",
         "-c",
         "from pathlib import Path; "
-        "print(Path('var/lib/cowrie/downloads/synthetic-marker').read_text())",
+        f"print(Path('var/lib/cowrie/downloads/{marker_name}').read_text())",
     )
     assert stored.returncode == 0 and stored.stdout.strip() == "lab-only"
 

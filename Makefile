@@ -14,7 +14,7 @@ REPORT_DIR ?= .artifacts
 GIT_SHA ?= $(shell git rev-parse HEAD)
 LOCK_SHA256 ?= $(shell (sha256sum uv.lock 2>/dev/null || shasum -a 256 uv.lock) | awk '{print $$1}')
 
-.PHONY: bootstrap audit-metadata format format-check lint typecheck test test-runtime sast sca secrets security-exceptions smoke-image container-check sbom quality
+.PHONY: bootstrap audit-metadata format format-check lint typecheck test test-runtime sast sca secrets security-exceptions smoke-image container-check sbom quality acceptance
 
 bootstrap:
 	$(UV) lock --check
@@ -97,3 +97,6 @@ quality:
 	$(MAKE) secrets
 	$(MAKE) security-exceptions
 	$(MAKE) container-check sbom
+
+acceptance: quality
+	$(MAKE) test-runtime

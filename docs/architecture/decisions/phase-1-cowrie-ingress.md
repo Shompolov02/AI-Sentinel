@@ -2,6 +2,9 @@
 
 Status: accepted for Issue #25.
 
+Issue #27 adds a separate HTTP ingress and isolated gateways; the current
+five-service topology is recorded in [Phase 1 runtime isolation](phase-1-runtime-isolation.md).
+
 ## Context
 
 On Docker Engine 29.2 with Docker Desktop, publishing ports from a container
@@ -28,8 +31,10 @@ configuration containing only two TCP proxy targets: `cowrie:2222` and
 `cowrie:2223`. It sends the PROXY header so Cowrie records the original client
 address. Cowrie listens for PROXY headers on those two ports. The sidecar has
 a read-only root filesystem, a small tmpfs, dropped capabilities,
-`no-new-privileges`, and resource limits. Nginx's HTTP service remains only on
-`prod_net`; neither Target App nor Cowrie joins `cowrie_ingress`.
+`no-new-privileges`, and resource limits. At the time of this decision,
+Nginx's HTTP service belonged only to `prod_net`; Issue #27 also attaches it
+to the internal `http_edge`. Neither Target App nor Cowrie joins
+`cowrie_ingress`.
 Compose explicitly selects UID `101` for both Nginx services and UID/GID
 `999:999` for Cowrie, matching the accepted images so static policy checks can
 verify non-root execution from the normalized configuration.

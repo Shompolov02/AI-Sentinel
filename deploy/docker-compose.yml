@@ -11,14 +11,46 @@ services:
     cpus: "0.25"
     mem_limit: 128m
     pids_limit: 50
-    ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${HTTP_PORT:-8080}:8080"
     environment:
       SERVER_NAME: ${SERVER_NAME:-localhost}
+      HTTP_EDGE_SUBNET: ${HTTP_EDGE_SUBNET:-172.30.40.0/24}
     volumes:
       - nginx-logs:/var/log/nginx
     depends_on:
       target-app:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8081/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - prod_net
+      - http_edge
+
+  http-ingress:
+    build:
+      context: ..
+      dockerfile: deploy/nginx/Dockerfile
+    image: ai-sentinel-nginx:local
+    user: "101"
+    entrypoint: ["nginx"]
+    command: ["-c", "/etc/nginx/http-ingress.conf", "-g", "daemon off;"]
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: "0.25"
+    mem_limit: 128m
+    pids_limit: 50
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${HTTP_PORT:-8080}:8080"
+    volumes:
+      - ./http-ingress.conf:/etc/nginx/http-ingress.conf:ro
+    depends_on:
+      nginx:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/health"]
@@ -27,7 +59,8 @@ services:
       retries: 3
       start_period: 10s
     networks:
-      - prod_net
+      - http_edge
+      - http_ingress
 
   target-app:
     build:
@@ -82,6 +115,12 @@ services:
     depends_on:
       cowrie:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "nginx", "-t", "-c", "/etc/nginx/cowrie-ingress.conf"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     networks:
       - honeynet
       - cowrie_ingress
@@ -131,13 +170,18 @@ volumes:
 
 networks:
   prod_net:
+    internal: true
     enable_ipv6: false
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
     ipam:
       config:
         - subnet: ${PROD_NET_SUBNET:-172.30.10.0/24}
   honeynet:
     internal: true
     enable_ipv6: false
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
     ipam:
       config:
         - subnet: ${HONEYNET_SUBNET:-172.30.20.0/24}
@@ -147,3 +191,17 @@ networks:
     ipam:
       config:
         - subnet: ${COWRIE_INGRESS_SUBNET:-172.30.30.0/24}
+  http_edge:
+    internal: true
+    enable_ipv6: false
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
+    ipam:
+      config:
+        - subnet: ${HTTP_EDGE_SUBNET:-172.30.40.0/24}
+  http_ingress:
+    internal: false
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: ${HTTP_INGRESS_SUBNET:-172.30.50.0/24}
