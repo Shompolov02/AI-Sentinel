@@ -145,7 +145,9 @@ def test_honeynet_runtime_decisions_are_documented_and_canonical() -> None:
         assert contract in specification
 
     assert "deploy/docker-compose.yml config > /dev/null" in makefile
-    assert "COWRIE_IMAGE=" in env_example
+    assert "COWRIE_IMAGE=" not in env_example
+    assert "COWRIE_SSH_PORT=2222" in env_example
+    assert "COWRIE_TELNET_PORT=2223" in env_example
     assert "BIND_ADDRESS=" in env_example
 
 

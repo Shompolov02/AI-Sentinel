@@ -10,7 +10,17 @@ docker compose -f deploy/docker-compose.yml up -d --build --wait
 docker compose -f deploy/docker-compose.yml ps
 curl --fail http://127.0.0.1:8080/health
 curl --fail http://127.0.0.1:8080/docs
+ssh -p 2222 synthetic@127.0.0.1
+telnet 127.0.0.1 2223
 ```
+
+При SSH/Telnet-проверке используйте только придуманные для лаборатории имена
+и пароли. По умолчанию TCP ingress Cowrie публикуется лишь на `127.0.0.1`;
+сам Cowrie не имеет host mapping и подключён только к `honeynet`. TCP ingress
+имеет ровно два маршрута к Cowrie, а также отдельную `cowrie_ingress`; к
+`prod_net` он не подключён. Если порты
+заняты, задайте `COWRIE_SSH_PORT` и `COWRIE_TELNET_PORT` в локальном `.env`.
+Порт хоста `22` не используется.
 
 Для проверки Host используйте `curl -v -H 'Host: unknown.test'
 http://127.0.0.1:8080/health`: Nginx закрывает соединение без HTTP-ответа.
@@ -19,11 +29,26 @@ http://127.0.0.1:8080/health`: Nginx закрывает соединение б�
 логи Target App — через `docker compose -f deploy/docker-compose.yml logs target-app`.
 Один `X-Request-ID` связывает HTTP-ответ и обе записи журналов.
 
+Cowrie хранит сырые JSON-события в `cowrie-logs`. В distroless-образе нет
+shell или `cat`, поэтому прочитать журнал можно встроенным Python:
+
+```sh
+docker compose -f deploy/docker-compose.yml exec -T cowrie /cowrie/cowrie-env/bin/python3 -c 'from pathlib import Path; print(Path("var/log/cowrie/cowrie.json").read_text())'
+```
+
+Downloads хранятся в `cowrie-downloads`, UUID и SSH host keys — в
+`cowrie-state`; `cowrie-etc` содержит встроенные файлы конфигурации образа и
+монтируется только для чтения. Остальное временное состояние Cowrie хранится
+в tmpfs. Проверьте фактический health status командой
+`docker compose -f deploy/docker-compose.yml ps` — он зависит от обоих
+listener, SSH и Telnet.
+
 ```sh
 make test-runtime
 make quality
 docker compose -f deploy/docker-compose.yml down
 ```
 
-`down` сохраняет named volumes. Для удаления синтетических данных и журналов
-после остановки используйте `docker compose -f deploy/docker-compose.yml down -v`.
+`down` сохраняет все named volumes, включая журналы, загрузки и состояние
+Cowrie. Для удаления синтетических данных и журналов после остановки
+**явно** используйте `docker compose -f deploy/docker-compose.yml down -v`.

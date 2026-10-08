@@ -43,7 +43,7 @@ uv run uvicorn target_app.main:app --app-dir services/target-app --reload --port
 
 Воспроизводимые лабораторные примеры: запрос `' OR '1'='1` в поиске возвращает все исходные активы; цель `127.0.0.1; echo "vuln_verified"` в диагностике показывает результат командной инъекции. Поле анализа событий только записывает недоверенный текст и correlation ID в структурированный журнал; LLM не вызывается. Эти поверхности предназначены исключительно для изолированного стенда.
 
-## Локальный HTTP edge
+## Локальный HTTP edge и Cowrie
 
 Запуск полного стенда: `docker compose -f deploy/docker-compose.yml up -d --build --wait`.
 Target App доступен через Nginx на `http://127.0.0.1:8080/`; прямой порт
@@ -55,6 +55,16 @@ Host получает закрытие соединения `444`. `BIND_ADDRESS
 Проверки: `docker compose -f deploy/docker-compose.yml config --quiet`,
 `make test-runtime` и `make quality`. JSON access log находится в named volume
 `nginx-logs`; `X-Request-ID` связывает ответ с журналами Nginx и Target App.
+Отдельный TCP ingress публикует ловушку Cowrie на `127.0.0.1:2222` и
+`127.0.0.1:2223` при настройках по умолчанию. Cowrie остаётся только в
+`honeynet`; ingress также подключён к отдельной сети `cowrie_ingress` и не
+имеет доступа к `prod_net`. Для тестового стенда с занятыми
+портами можно задать `COWRIE_SSH_PORT` и `COWRIE_TELNET_PORT`; `BIND_ADDRESS`
+по-прежнему управляет адресом публикации. Cowrie пишет исходный `cowrie.json`
+в `cowrie-logs`, downloads — в `cowrie-downloads`. Том `cowrie-state` сохраняет
+UUID и SSH host keys, а `cowrie-etc` хранит встроенную конфигурацию образа
+только для чтения. Root filesystem Cowrie доступна только для чтения; прочее
+временное состояние размещается на tmpfs.
 Команды просмотра логов и безопасной остановки описаны в
 [`docs/runbooks/phase-1-local-edge.md`](docs/runbooks/phase-1-local-edge.md).
 
