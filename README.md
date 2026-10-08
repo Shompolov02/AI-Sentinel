@@ -43,6 +43,21 @@ uv run uvicorn target_app.main:app --app-dir services/target-app --reload --port
 
 Воспроизводимые лабораторные примеры: запрос `' OR '1'='1` в поиске возвращает все исходные активы; цель `127.0.0.1; echo "vuln_verified"` в диагностике показывает результат командной инъекции. Поле анализа событий только записывает недоверенный текст и correlation ID в структурированный журнал; LLM не вызывается. Эти поверхности предназначены исключительно для изолированного стенда.
 
+## Локальный HTTP edge
+
+Запуск полного стенда: `docker compose -f deploy/docker-compose.yml up -d --build --wait`.
+Target App доступен через Nginx на `http://127.0.0.1:8080/`; прямой порт
+приложения на хосте не публикуется. Опубликованные порты по умолчанию привязаны
+к IPv4 loopback. `SERVER_NAME` добавляет разрешённый HTTP Host; неизвестный
+Host получает закрытие соединения `444`. `BIND_ADDRESS=0.0.0.0` допустим только
+в явно изолированной лабораторной сети.
+
+Проверки: `docker compose -f deploy/docker-compose.yml config --quiet`,
+`make test-runtime` и `make quality`. JSON access log находится в named volume
+`nginx-logs`; `X-Request-ID` связывает ответ с журналами Nginx и Target App.
+Команды просмотра логов и безопасной остановки описаны в
+[`docs/runbooks/phase-1-local-edge.md`](docs/runbooks/phase-1-local-edge.md).
+
 ## Команды разработки
 
 Канонический интерфейс разработки находится в `Makefile` и не требует ручной активации виртуального окружения:
@@ -53,6 +68,7 @@ make format          # форматирование Ruff
 make lint            # lint Ruff
 make typecheck       # строгий mypy
 make test            # pytest и coverage
+make test-runtime    # HTTP edge и изоляция в Docker Compose
 make sast            # Semgrep, fail-closed
 make sca             # pip-audit, fail-closed
 make secrets         # Gitleaks, fail-closed

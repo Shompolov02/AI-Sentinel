@@ -34,9 +34,14 @@ Target App HTTP errors use the common JSON shape:
 }
 ```
 
-Nginx overwrites inbound `X-Request-ID` before proxying. The request ID used by
-the application is returned in the `X-Request-ID` response header, including
-for errors and health responses. Client-supplied IDs are not trusted.
+Nginx overwrites inbound `X-Request-ID` with its own `$request_id` before
+proxying. In the Compose deployment, Target App accepts that 32-character hex
+ID from the edge and uses it in response headers, supported response bodies,
+and structured logs. Nginx also writes the same ID to its JSON access log.
+Direct Target App runs generate their own IDs, so direct clients cannot choose
+one. Compose admits only Nginx and Target App to `prod_net`; adding another
+service to that network changes the request-ID trust boundary and requires
+review. Client-supplied forwarding headers are overwritten or removed at Nginx.
 
 ## Runtime test harness
 

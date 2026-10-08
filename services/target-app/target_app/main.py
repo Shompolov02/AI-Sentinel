@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import re
 import sqlite3
 import time
 import uuid
@@ -17,6 +19,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
 from target_app.surfaces import PingTimedOut, run_ping, search_assets
@@ -66,10 +69,19 @@ class SecurityAndCorrelationMiddleware(BaseHTTPMiddleware):
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
         started = time.perf_counter()
-        # Nginx overwrites this header at ingress; direct client values are untrusted.
-        correlation_id = str(uuid.uuid4())
+        # The Compose network contains only this app and the edge, which overwrites
+        # client forwarding headers. Direct application runs keep their own ID.
+        trusted_edge = os.environ.get("TRUST_NGINX_HEADERS") == "1"
+        incoming_id = request.headers.get("x-request-id", "")
+        edge_id_is_valid = re.fullmatch(r"[0-9a-f]{32}", incoming_id) is not None
+        correlation_id = (
+            incoming_id if trusted_edge and edge_id_is_valid else str(uuid.uuid4())
+        )
         request.state.correlation_id = correlation_id
-        client_ip = request.headers.get("x-real-ip", "unknown")
+        peer_ip = request.client.host if request.client is not None else "unknown"
+        client_ip = (
+            request.headers.get("x-real-ip", peer_ip) if trusted_edge else peer_ip
+        )
         try:
             response = await call_next(request)
         except Exception:
@@ -196,6 +208,13 @@ async def validation_error_handler(
     request: Request, _exc: RequestValidationError
 ) -> JSONResponse:
     return error_response(request.state.correlation_id, 400)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_error_handler(
+    request: Request, exc: StarletteHTTPException
+) -> JSONResponse:
+    return error_response(request.state.correlation_id, exc.status_code)
 
 
 @app.exception_handler(Exception)
