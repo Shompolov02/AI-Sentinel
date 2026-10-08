@@ -14,7 +14,7 @@ REPORT_DIR ?= .artifacts
 GIT_SHA ?= $(shell git rev-parse HEAD)
 LOCK_SHA256 ?= $(shell (sha256sum uv.lock 2>/dev/null || shasum -a 256 uv.lock) | awk '{print $$1}')
 
-.PHONY: bootstrap audit-metadata format format-check lint typecheck test sast sca secrets security-exceptions smoke-image container-check sbom quality
+.PHONY: bootstrap audit-metadata format format-check lint typecheck test test-runtime sast sca secrets security-exceptions smoke-image container-check sbom quality
 
 bootstrap:
 	$(UV) lock --check
@@ -38,6 +38,9 @@ typecheck:
 
 test: audit-metadata
 	$(PYTEST) -q --junitxml=$(REPORT_DIR)/test-results.xml --cov=ai_sentinel_smoke --cov-fail-under=80 --cov-report=term-missing --cov-report=xml:$(REPORT_DIR)/coverage.xml
+
+test-runtime:
+	AI_SENTINEL_REQUIRE_DOCKER=1 $(PYTEST) -q -m runtime
 
 sast: audit-metadata
 	$(SEMGREP) scan --config p/python --config .semgrep.yml --error --exclude tests/security/fixtures --sarif --output $(REPORT_DIR)/semgrep.sarif .

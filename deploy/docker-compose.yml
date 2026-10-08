@@ -1,6 +1,9 @@
 services:
   nginx:
-    image: nginxinc/nginx-unprivileged:1.27-alpine
+    build:
+      context: ..
+      dockerfile: deploy/nginx/Dockerfile
+    image: ai-sentinel-nginx:local
     restart: unless-stopped
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -8,14 +11,16 @@ services:
     mem_limit: 128m
     pids_limit: 50
     ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:8080:80"
+      - "${BIND_ADDRESS:-127.0.0.1}:${HTTP_PORT:-8080}:8080"
+    environment:
+      SERVER_NAME: ${SERVER_NAME:-localhost}
     volumes:
       - nginx-logs:/var/log/nginx
     depends_on:
       target-app:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/health"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/health"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -28,6 +33,8 @@ services:
       context: ..
       dockerfile: services/target-app/Dockerfile
     image: ai-sentinel-target-app:local
+    environment:
+      TRUST_NGINX_HEADERS: "1"
     restart: unless-stopped
     user: "10001:10001"
     read_only: true
@@ -65,7 +72,11 @@ services:
       - cowrie-logs:/cowrie/cowrie-git/var/log/cowrie
       - cowrie-downloads:/cowrie/cowrie-git/var/lib/cowrie/downloads
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import socket; s=socket.create_connection(('127.0.0.1', 2222), 3); s.close()\""]
+      test:
+        - CMD
+        - /cowrie/cowrie-env/bin/python3
+        - -c
+        - "import socket; socket.create_connection(('127.0.0.1', 2222), 3).close()"
       interval: 30s
       timeout: 5s
       retries: 3
@@ -81,13 +92,11 @@ volumes:
 
 networks:
   prod_net:
-    name: ai-sentinel-prod-net
     enable_ipv6: false
     ipam:
       config:
         - subnet: ${PROD_NET_SUBNET:-172.30.10.0/24}
   honeynet:
-    name: ai-sentinel-honeynet
     internal: true
     enable_ipv6: false
     ipam:

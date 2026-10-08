@@ -277,6 +277,33 @@ def test_client_supplied_request_id_is_not_trusted() -> None:
     assert response.json()["correlation_id"] == response.headers["x-request-id"]
 
 
+def test_trusted_nginx_request_id_is_used_for_body_header_and_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    edge_id = "a" * 32
+    monkeypatch.setenv("TRUST_NGINX_HEADERS", "1")
+    with patch.object(logger, "info") as log:
+        response = client.get(
+            "/health",
+            headers={"X-Request-ID": edge_id, "X-Real-IP": "192.0.2.10"},
+        )
+
+    assert response.headers["x-request-id"] == edge_id
+    assert response.json()["correlation_id"] == edge_id
+    assert log.call_args.kwargs["extra"]["correlation_id"] == edge_id
+    assert log.call_args.kwargs["extra"]["client_ip"] == "192.0.2.10"
+
+
+def test_trusted_proxy_mode_rejects_malformed_request_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRUST_NGINX_HEADERS", "1")
+    response = client.get("/health", headers={"X-Request-ID": "attacker-value"})
+
+    assert response.headers["x-request-id"] != "attacker-value"
+    assert response.json()["correlation_id"] == response.headers["x-request-id"]
+
+
 def test_validation_error_uses_canonical_error_and_correlation_contract() -> None:
     response = client.post("/api/analyze", json={"text": "x" * 4097})
 
@@ -285,6 +312,17 @@ def test_validation_error_uses_canonical_error_and_correlation_contract() -> Non
         "error": "Request could not be processed",
         "correlation_id": response.headers["x-request-id"],
         "status": 400,
+    }
+
+
+def test_missing_route_uses_canonical_error_and_correlation_contract() -> None:
+    response = client.get("/missing")
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": "Request could not be processed",
+        "correlation_id": response.headers["x-request-id"],
+        "status": 404,
     }
 
 

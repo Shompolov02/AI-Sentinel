@@ -171,3 +171,20 @@ jobs:
             .artifacts/ci-metadata.json
           if-no-files-found: error
           retention-days: 14
+
+  runtime-edge:
+    name: Runtime HTTP edge
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
+        with:
+          version: "0.12.17"
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: "3.10"
+      - run: make bootstrap
+      - run: make test-runtime

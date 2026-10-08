@@ -27,7 +27,8 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--strict-markers --strict-config"
+addopts = "--strict-markers --strict-config -m 'not runtime'"
+markers = ["runtime: local Docker Compose acceptance checks"]
 
 [tool.ruff]
 target-version = "py310"
