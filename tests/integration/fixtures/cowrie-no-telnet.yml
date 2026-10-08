@@ -1,0 +1,13 @@
+services:
+  cowrie:
+    environment:
+      COWRIE_TELNET_ENABLED: "false"
+    ports: !override []
+    healthcheck:
+      interval: 1s
+      timeout: 3s
+      retries: 2
+      start_period: 1s
+networks:
+  honeynet:
+    ipam: !override {}

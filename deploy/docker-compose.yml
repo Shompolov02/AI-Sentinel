@@ -57,26 +57,60 @@ services:
     networks:
       - prod_net
 
+  cowrie-ingress:
+    build:
+      context: ..
+      dockerfile: deploy/nginx/Dockerfile
+    image: ai-sentinel-nginx:local
+    entrypoint: ["nginx"]
+    command: ["-c", "/etc/nginx/cowrie-ingress.conf", "-g", "daemon off;"]
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: "0.25"
+    mem_limit: 128m
+    pids_limit: 50
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${COWRIE_SSH_PORT:-2222}:2222/tcp"
+      - "${BIND_ADDRESS:-127.0.0.1}:${COWRIE_TELNET_PORT:-2223}:2223/tcp"
+    volumes:
+      - ./cowrie-ingress.conf:/etc/nginx/cowrie-ingress.conf:ro
+    depends_on:
+      cowrie:
+        condition: service_healthy
+    networks:
+      - honeynet
+      - cowrie_ingress
+
   cowrie:
     image: cowrie/cowrie:3.0.15@sha256:fc57120d88c2bfb5817f63f6c132ce5c2969b641c2f1ac67887652b6f294148d
     restart: unless-stopped
+    read_only: true
+    environment:
+      COWRIE_TELNET_ENABLED: "true"
+      COWRIE_SSH_FORWARDING: "false"
+      COWRIE_SSH_LISTEN_ENDPOINTS: "haproxy:tcp:2222:interface=0.0.0.0"
+      COWRIE_TELNET_LISTEN_ENDPOINTS: "haproxy:tcp:2223:interface=0.0.0.0"
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     cpus: "0.5"
     mem_limit: 512m
     pids_limit: 100
-    ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:2222:2222/tcp"
-      - "${BIND_ADDRESS:-127.0.0.1}:2223:2223/tcp"
+    tmpfs:
+      - "/cowrie/cowrie-git/var:rw,noexec,nosuid,size=64m,uid=999,gid=999"
     volumes:
+      - cowrie-etc:/cowrie/cowrie-git/etc:ro
       - cowrie-logs:/cowrie/cowrie-git/var/log/cowrie
+      - cowrie-state:/cowrie/cowrie-git/var/lib/cowrie
       - cowrie-downloads:/cowrie/cowrie-git/var/lib/cowrie/downloads
     healthcheck:
       test:
         - CMD
         - /cowrie/cowrie-env/bin/python3
         - -c
-        - "import socket; socket.create_connection(('127.0.0.1', 2222), 3).close()"
+        - "import socket; [socket.create_connection(('127.0.0.1', port), 2).close() for port in (2222, 2223)]"
       interval: 30s
       timeout: 5s
       retries: 3
@@ -89,6 +123,8 @@ volumes:
   target-app-data:
   cowrie-logs:
   cowrie-downloads:
+  cowrie-etc:
+  cowrie-state:
 
 networks:
   prod_net:
@@ -102,3 +138,6 @@ networks:
     ipam:
       config:
         - subnet: ${HONEYNET_SUBNET:-172.30.20.0/24}
+  cowrie_ingress:
+    internal: false
+    enable_ipv6: false

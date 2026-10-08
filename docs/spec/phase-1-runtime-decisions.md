@@ -14,6 +14,23 @@
 
 Cowrie закреплён как
 `cowrie/cowrie:3.0.15@sha256:fc57120d88c2bfb5817f63f6c132ce5c2969b641c2f1ac67887652b6f294148d`.
+В Compose включён Telnet и отключён SSH forwarding. Healthcheck запускает
+Python без shell и требует доступности обоих listener. Образ запускается от
+UID/GID `999:999` с `read_only: true`; объявленные им каталоги `etc` и `var`
+закрыты явными mounts. `cowrie-etc` монтируется только для чтения,
+`cowrie-state` хранит UUID и SSH host keys, `cowrie-logs` и
+`cowrie-downloads` сохраняют сырые журналы и загрузки. Прочие данные в `var`
+временные и размещены на tmpfs с владельцем `999:999`. Проверка на Docker
+Engine 29.2 подтвердила запуск SSH/Telnet без writable rootfs и без ошибок
+записи при такой конфигурации.
+
+Docker Engine 29.2 не публикует host ports контейнера, присоединённого только
+к `internal: true` сети. Поэтому Cowrie остаётся без `ports` и подключается
+только к `honeynet`; отдельный `cowrie-ingress` слушает loopback SSH/Telnet на
+`cowrie_ingress` и пересылает два TCP-потока в Honeynet. Nginx HTTP edge
+по-прежнему подключён только к `prod_net`. TCP ingress передаёт адрес клиента
+по PROXY protocol; причина и границы доверия записаны в
+`docs/architecture/decisions/phase-1-cowrie-ingress.md`.
 
 ## HTTP ingress, ошибки и корреляция
 

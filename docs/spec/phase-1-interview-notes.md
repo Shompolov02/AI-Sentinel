@@ -52,11 +52,13 @@
 **Решение:** нет. Nginx выполняет только L7 HTTP reverse proxy и подключён только к `prod_net`.
 
 - Nginx проксирует HTTP-трафик на `target-app:8000`.
-- Cowrie публикуется прямым Docker port mapping на изолированный контейнер:
-  - `127.0.0.1:2222 -> cowrie:2222/tcp`;
-  - `127.0.0.1:2223 -> cowrie:2223/tcp`.
+- После уточнения в Issue #25 Cowrie остаётся только в `honeynet`, а host
+  mapping публикует отдельный TCP ingress:
+  - `127.0.0.1:2222 -> cowrie-ingress -> cowrie:2222/tcp`;
+  - `127.0.0.1:2223 -> cowrie-ingress -> cowrie:2223/tcp`.
 - Nginx не подключается к `honeynet`.
-- Такое разделение не позволяет использовать Nginx как сетевой мост между `prod_net` и `honeynet`.
+- HTTP Nginx не служит мостом между `prod_net` и `honeynet`; отдельный TCP
+  ingress принимает только SSH/Telnet и не подключён к `prod_net`.
 
 ### Вопрос 5. Сетевая схема
 
@@ -69,12 +71,15 @@ Host localhost
    |
    +-- 8080 -> nginx -- prod_net -- target-app:8000
    |
-   +-- 2222 -> cowrie:2222 -- honeynet
-   +-- 2223 -> cowrie:2223 -- honeynet
+   +-- 2222 -> cowrie-ingress -- honeynet -> cowrie:2222
+   +-- 2223 -> cowrie-ingress -- honeynet -> cowrie:2223
 ```
 
 - `prod_net` содержит только Nginx и Target App.
-- `honeynet` содержит только Cowrie.
+- `honeynet` содержит Cowrie и ограниченный TCP ingress; Cowrie подключён
+  только к этой сети.
+- `cowrie_ingress` содержит только TCP ingress и обеспечивает публикацию host
+  портов на Docker Engine, где internal-only сеть их не публикует.
 - `management_net` в Фазе 1 не создаётся; он может появиться в Фазе 2 вместе с Fluent Bit.
 - Контейнеры не используют `network_mode: host`.
 - Docker socket никуда не монтируется.
@@ -132,7 +137,8 @@ HONEYNET_SUBNET=172.30.20.0/24
 **Решение:** Фаза 1 считается готовой при наличии:
 
 1. воспроизводимого Docker Compose-стенда с non-root контейнерами;
-2. раздельных сетей `prod_net` и `honeynet`;
+2. раздельных `prod_net` и `honeynet` с отдельным TCP ingress на
+   `cowrie_ingress`;
 3. Nginx-шлюза перед Target App;
 4. Cowrie с raw JSON-логами в примонтированный том;
 5. FastAPI Target App с Jinja2/CSS UI и поверхностями Command Injection, SQLi и Prompt Injection;
@@ -466,14 +472,15 @@ Content-Security-Policy: default-src 'self'; style-src 'self' 'unsafe-inline'; s
 
 **Решение:** Pytest проверяет:
 
-- наличие ровно `prod_net` и `honeynet`;
-- состав сетей: Nginx и Target App только в `prod_net`, Cowrie только в `honeynet`;
+- наличие `prod_net`, `honeynet` и отдельной `cowrie_ingress`;
+- состав сетей: HTTP Nginx и Target App только в `prod_net`, Cowrie только в
+  `honeynet`, TCP ingress в `honeynet` и `cowrie_ingress`;
 - отсутствие `ports` у Target App;
-- публикацию Cowrie только на `2222` и `2223`;
+- публикацию TCP ingress только на `2222` и `2223` без прямых host ports у Cowrie;
 - использование `${BIND_ADDRESS}` и default `127.0.0.1`;
 - `honeynet.internal: true` и ожидаемые IPv4 CIDR;
 - non-root, `cap_drop`, `no-new-privileges`, resource limits;
-- отсутствие privileged, host network, Docker socket и лишних сетей;
+- отсутствие privileged, host network, Docker socket и иных лишних сетей;
 - наличие healthchecks.
 
 ### Вопрос 12. Healthchecks

@@ -8,7 +8,7 @@
 
 ## Solution
 
-Создать локальный Docker Compose стенд с двумя изолированными зонами: `prod_net` для Nginx и Target App и `honeynet` только для Cowrie. По умолчанию публиковать HTTP, SSH и Telnet только на IPv4 loopback хоста. Закрепить минимальные права контейнеров, ограничить ресурсы, сохранить необходимые данные в named volumes, а сетевую изоляцию и основные сценарии проверять статическими и runtime-тестами.
+Создать локальный Docker Compose стенд с двумя изолированными зонами: `prod_net` для HTTP Nginx и Target App и `honeynet` для Cowrie. Узкий TCP ingress связывает отдельную host-facing сеть `cowrie_ingress` с Honeynet. По умолчанию публиковать HTTP, SSH и Telnet только на IPv4 loopback хоста. Закрепить минимальные права контейнеров, ограничить ресурсы, сохранить необходимые данные в named volumes, а сетевую изоляцию и основные сценарии проверять статическими и runtime-тестами.
 
 Target App намеренно предоставляет контролируемые Command Injection, SQLi и Prompt Injection surfaces. Это лабораторная цель, не production-сервис. Target App не вызывает внешние LLM и не получает доступ к Honeynet или внешней сети.
 
@@ -40,20 +40,20 @@ Target App намеренно предоставляет контролируе�
 ## Implementation Decisions
 
 - Платформа только локальный Docker Compose. K3s и Ansible не входят в Фазу 1.
-- Сервисы: Nginx, Target App (FastAPI) и Cowrie. `management_net`, Fluent Bit и нормализация Событий безопасности относятся к следующей фазе.
-- Сети: `prod_net` содержит только Nginx и Target App; `honeynet` содержит только Cowrie и имеет `internal: true`. Используются только IPv4 CIDR; IPv6 отключается на Compose bridge, если поддерживается. Контейнеры не используют `network_mode: host`.
+- Сервисы: HTTP Nginx, Target App (FastAPI), Cowrie и отдельный TCP ingress для SSH/Telnet. `management_net`, Fluent Bit и нормализация Событий безопасности относятся к следующей фазе.
+- Сети: `prod_net` содержит только HTTP Nginx и Target App; `honeynet` содержит Cowrie и TCP ingress и имеет `internal: true`; `cowrie_ingress` содержит только TCP ingress. Cowrie подключён только к `honeynet`. Используются только IPv4 CIDR; IPv6 отключается на Compose bridge, если поддерживается. Контейнеры не используют `network_mode: host`.
 - Топология входа:
 
   ```text
   127.0.0.1:8080 -> nginx -> prod_net -> target-app:8000
-  127.0.0.1:2222 -> cowrie:2222 -> honeynet
-  127.0.0.1:2223 -> cowrie:2223 -> honeynet
+  127.0.0.1:2222 -> TCP ingress -> honeynet -> cowrie:2222
+  127.0.0.1:2223 -> TCP ingress -> honeynet -> cowrie:2223
   ```
 
-- Публикуются только HTTP `8080/tcp`, SSH `2222/tcp` и Telnet `2223/tcp`, через `${BIND_ADDRESS}` с default `127.0.0.1`. Target App не имеет `ports`. TLS и host port 22 не используются. Режим `0.0.0.0` допустим только для изолированной лаборатории и сопровождается заметным предупреждением в runbook.
+- Публикуются только HTTP `8080/tcp`, SSH `2222/tcp` и Telnet `2223/tcp`, через `${BIND_ADDRESS}` с default `127.0.0.1`. Target App и Cowrie не имеют `ports`; SSH/Telnet публикует только TCP ingress. TLS и host port 22 не используются. Режим `0.0.0.0` допустим только для изолированной лаборатории и сопровождается заметным предупреждением в runbook.
 - Основной Compose-манифест должен иметь один канонический путь в `deploy/` или `infrastructure/compose/`; допустим корневой симлинк. Выбранное имя и путь должны быть единообразно отражены в документации и тестовых командах.
 - Egress deny-by-default. У Cowrie нет пути в production-like, host или внешние сети. Target App не требует внешних зависимостей и не имеет egress. `internal: true` считается декларативной частью контроля, но не доказательством изоляции: требуется runtime-проверка.
-- Nginx выполняет только HTTP reverse proxy на `target-app:8000`. Он не подключается к Honeynet. Неизвестный Host обрабатывается отдельным default server (ответ `444` или `400`); основной server разрешает `localhost`, `127.0.0.1` и `${SERVER_NAME:-localhost}`.
+- HTTP Nginx выполняет только reverse proxy на `target-app:8000` и не подключается к Honeynet. Отдельный TCP ingress использует Nginx stream только для `cowrie:2222/2223`; он не подключается к `prod_net`. Неизвестный HTTP Host обрабатывается отдельным default server (ответ `444` или `400`); основной server разрешает `localhost`, `127.0.0.1` и `${SERVER_NAME:-localhost}`.
 - Nginx генерирует новый `$request_id` для каждого запроса, перезаписывает клиентский `X-Request-ID` и передаёт собственное значение Target App. Target App возвращает correlation ID в response header и response body, если это совместимо с контрактом конкретного endpoint, и включает ID в JSON-логи. Пересылка client IP и доверие к forwarded headers должны быть явно ограничены Nginx; произвольным клиентским forwarded headers доверять нельзя.
 - Nginx и Target App запускаются non-root. Для обоих: `cap_drop: [ALL]`, `no-new-privileges: true`, отсутствие `privileged`, Docker socket и host networking. Target App использует UID `10001`; Nginx — встроенного unprivileged-пользователя выбранного образа.
 - Resource limits: Nginx `cpus: "0.25"`, `mem_limit: 128m`, `pids_limit: 50`; Target App `cpus: "0.5"`, `mem_limit: 512m`, `pids_limit: 100`.

@@ -11,6 +11,8 @@ production service.
 `deploy/docker-compose.yml` is the canonical Compose manifest for the Phase 1
 runtime. Validation and runtime tooling must use this file; the initial manifest
 defines the isolated `prod_net` and `honeynet` networks.
+Issue #25 adds a dedicated TCP ingress bridge while keeping Cowrie only on
+`honeynet`; see [Cowrie TCP ingress](phase-1-cowrie-ingress.md).
 
 Cowrie uses the immutable image reference
 `cowrie/cowrie:3.0.15@sha256:fc57120d88c2bfb5817f63f6c132ce5c2969b641c2f1ac67887652b6f294148d`.
