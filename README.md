@@ -53,7 +53,9 @@ Host получает закрытие соединения `444`. `BIND_ADDRESS
 в явно изолированной лабораторной сети.
 
 Проверки: `docker compose -f deploy/docker-compose.yml config --quiet`,
-`make test-runtime` и `make quality`. JSON access log находится в named volume
+`make test`, `make test-runtime` и `make quality`. Pytest в общем quality gate
+проверяет нормализованный Compose как статическую security policy. JSON access
+log находится в named volume
 `nginx-logs`; `X-Request-ID` связывает ответ с журналами Nginx и Target App.
 Отдельный TCP ingress публикует ловушку Cowrie на `127.0.0.1:2222` и
 `127.0.0.1:2223` при настройках по умолчанию. Cowrie остаётся только в

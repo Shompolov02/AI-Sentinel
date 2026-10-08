@@ -2,6 +2,10 @@
 
 Все команды выполняются из корня проекта. Перед запуском проверьте `.env`:
 `BIND_ADDRESS=127.0.0.1`, `HTTP_PORT=8080`, `SERVER_NAME=localhost`.
+Подсети `PROD_NET_SUBNET=172.30.10.0/24`,
+`HONEYNET_SUBNET=172.30.20.0/24` и
+`COWRIE_INGRESS_SUBNET=172.30.30.0/24` должны не пересекаться друг с другом
+и локальными сетями Docker/VPN; при конфликте задайте другие IPv4 CIDR в `.env`.
 Публикация на `0.0.0.0` разрешена только в изолированной лабораторной сети.
 
 ```sh
@@ -45,6 +49,7 @@ listener, SSH и Telnet.
 
 ```sh
 make test-runtime
+make test
 make quality
 docker compose -f deploy/docker-compose.yml down
 ```
