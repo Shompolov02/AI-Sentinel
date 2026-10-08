@@ -175,15 +175,13 @@ def test_nginx_cannot_resolve_or_reach_cowrie(runtime: Runtime) -> None:
     cowrie_ip = inspected.stdout.strip()
     assert cowrie_ip
 
-    reachable_dns = runtime.compose("exec", "-T", "nginx", "nslookup", "target-app")
-    assert reachable_dns.returncode == 0, reachable_dns.stderr
     reachable_tcp = runtime.compose(
         "exec", "-T", "nginx", "nc", "-z", "-w", "2", "target-app", "8000"
     )
     assert reachable_tcp.returncode == 0, reachable_tcp.stderr
 
     dns = runtime.compose("exec", "-T", "nginx", "nslookup", "cowrie")
-    assert dns.returncode != 0
+    assert dns.returncode == 1, dns.stdout + dns.stderr
     route = runtime.compose(
         "exec", "-T", "nginx", "nc", "-z", "-w", "2", cowrie_ip, "2222"
     )
