@@ -1,4 +1,6 @@
 server_tokens off;
+set_real_ip_from ${HTTP_EDGE_SUBNET};
+real_ip_header proxy_protocol;
 
 log_format json_access escape=json
     '{"time_iso8601":"$time_iso8601",'
@@ -13,14 +15,14 @@ log_format json_access escape=json
     '"request_id":"$request_id"}';
 
 server {
-    listen 8080 default_server;
+    listen 8080 default_server proxy_protocol;
     server_name _;
     access_log /var/log/nginx/access.log json_access;
     return 444;
 }
 
 server {
-    listen 8080;
+    listen 8080 proxy_protocol;
     server_name localhost 127.0.0.1 ${SERVER_NAME};
     access_log /var/log/nginx/access.log json_access;
 
@@ -57,5 +59,15 @@ server {
         add_header X-Content-Type-Options nosniff always;
         add_header X-Frame-Options DENY always;
         add_header Referrer-Policy no-referrer always;
+    }
+}
+
+server {
+    listen 127.0.0.1:8081;
+    server_name localhost;
+    access_log off;
+
+    location = /health {
+        proxy_pass http://target-app:8000/health;
     }
 }

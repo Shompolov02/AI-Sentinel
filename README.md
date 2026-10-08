@@ -46,14 +46,18 @@ uv run uvicorn target_app.main:app --app-dir services/target-app --reload --port
 ## Локальный HTTP edge и Cowrie
 
 Запуск полного стенда: `docker compose -f deploy/docker-compose.yml up -d --build --wait`.
-Target App доступен через Nginx на `http://127.0.0.1:8080/`; прямой порт
-приложения на хосте не публикуется. Опубликованные порты по умолчанию привязаны
+Target App доступен через отдельный HTTP ingress и Nginx на
+`http://127.0.0.1:8080/`; прямой порт приложения на хосте не публикуется.
+Nginx и Target App работают во внутренних сетях без внешнего маршрута.
+Опубликованные порты по умолчанию привязаны
 к IPv4 loopback. `SERVER_NAME` добавляет разрешённый HTTP Host; неизвестный
 Host получает закрытие соединения `444`. `BIND_ADDRESS=0.0.0.0` допустим только
 в явно изолированной лабораторной сети.
 
 Проверки: `docker compose -f deploy/docker-compose.yml config --quiet`,
-`make test`, `make test-runtime` и `make quality`. Pytest в общем quality gate
+`make test`, `make test-runtime`, `make quality` и `make acceptance`.
+Последняя команда объединяет quality gate с обязательными runtime-пробами.
+Pytest в общем quality gate
 проверяет нормализованный Compose как статическую security policy. JSON access
 log находится в named volume
 `nginx-logs`; `X-Request-ID` связывает ответ с журналами Nginx и Target App.
@@ -81,6 +85,7 @@ make lint            # lint Ruff
 make typecheck       # строгий mypy
 make test            # pytest и coverage
 make test-runtime    # HTTP edge и изоляция в Docker Compose
+make acceptance      # quality gate и обязательная runtime-приёмка
 make sast            # Semgrep, fail-closed
 make sca             # pip-audit, fail-closed
 make secrets         # Gitleaks, fail-closed

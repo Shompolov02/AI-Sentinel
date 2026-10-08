@@ -28,13 +28,17 @@ Docker Engine 29.2 не публикует host ports контейнера, пр
 к `internal: true` сети. Поэтому Cowrie остаётся без `ports` и подключается
 только к `honeynet`; отдельный `cowrie-ingress` слушает loopback SSH/Telnet на
 `cowrie_ingress` и пересылает два TCP-потока в Honeynet. Nginx HTTP edge
-по-прежнему подключён только к `prod_net`. TCP ingress передаёт адрес клиента
+подключён только к внутренним `prod_net` и `http_edge`, без host-facing сети.
+Отдельный `http-ingress` публикует HTTP через `http_ingress` и передаёт поток
+на Nginx по `http_edge`. TCP ingress передаёт адрес клиента
 по PROXY protocol; причина и границы доверия записаны в
-`docs/architecture/decisions/phase-1-cowrie-ingress.md`.
+`docs/architecture/decisions/phase-1-cowrie-ingress.md`. Обновлённая топология
+и изолированные gateway зафиксированы в
+`docs/architecture/decisions/phase-1-runtime-isolation.md`.
 
 ## HTTP ingress, ошибки и корреляция
 
-Nginx — единственный опубликованный HTTP-вход. Он проксирует `/health` и
+HTTP ingress — единственный опубликованный HTTP-вход. Основной Nginx проксирует `/health` и
 остальные маршруты на `target-app:8000`; неизвестный Host закрывает с `444`.
 Target App сохраняет принятый JSON-контракт ошибок: `error`,
 `correlation_id`, `status`.
@@ -45,14 +49,19 @@ Nginx выпускает новый `$request_id` на каждом запрос
 Nginx записывает тот же ID в JSON access log. При прямом запуске приложение
 генерирует свой ID. Nginx формирует `X-Real-IP`, `X-Forwarded-For`,
 `X-Forwarded-Host` и `X-Forwarded-Proto` из фактического ingress-соединения,
-а прочие распространённые forwarding headers удаляет. Клиентская цепочка
-forwarded адресов не используется.
+а прочие распространённые forwarding headers удаляет. Исходный адрес клиента
+передаётся от HTTP ingress по PROXY protocol и принимается только из `http_edge`.
+Docker Desktop может подставлять адрес своего gateway для loopback-клиента;
+это наблюдаемый ingress-адрес, а не произвольный клиентский заголовок.
+Клиентская цепочка forwarded адресов не используется.
 
 ## Runtime harness
 
 Pytest suite в `tests/integration/` использует Docker Compose plugin и
 канонический манифест. Для каждого запуска выбираются отдельный project name
 и host HTTP port; очистка всегда выполняет `down --volumes --remove-orphans`.
-Локальный запуск без Docker явно пропускается, а `make test-runtime` и CI
-требуют Docker Engine и завершаются ошибкой при его недоступности. Тесты
-проверяют опубликованный HTTP, логи и отсутствие доступа Nginx к Cowrie.
+Локальный обычный Pytest без Docker пропускает runtime marker, а
+`make test-runtime`, `make acceptance` и CI требуют Docker Engine и завершаются
+ошибкой при его недоступности. Тесты проверяют все host-facing протоколы,
+двунаправленную изоляцию, отсутствие egress у Target App и Cowrie, логи и
+сохранность named volumes после пересоздания сервисов.

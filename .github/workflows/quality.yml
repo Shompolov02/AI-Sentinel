@@ -173,7 +173,7 @@ jobs:
           retention-days: 14
 
   runtime-edge:
-    name: Runtime HTTP edge
+    name: Runtime isolation acceptance
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

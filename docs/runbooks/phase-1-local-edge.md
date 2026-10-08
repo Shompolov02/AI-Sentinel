@@ -4,7 +4,8 @@
 `BIND_ADDRESS=127.0.0.1`, `HTTP_PORT=8080`, `SERVER_NAME=localhost`.
 Подсети `PROD_NET_SUBNET=172.30.10.0/24`,
 `HONEYNET_SUBNET=172.30.20.0/24` и
-`COWRIE_INGRESS_SUBNET=172.30.30.0/24` должны не пересекаться друг с другом
+`COWRIE_INGRESS_SUBNET=172.30.30.0/24`, `HTTP_EDGE_SUBNET=172.30.40.0/24`
+и `HTTP_INGRESS_SUBNET=172.30.50.0/24` должны не пересекаться друг с другом
 и локальными сетями Docker/VPN; при конфликте задайте другие IPv4 CIDR в `.env`.
 Публикация на `0.0.0.0` разрешена только в изолированной лабораторной сети.
 
@@ -24,7 +25,10 @@ telnet 127.0.0.1 2223
 имеет ровно два маршрута к Cowrie, а также отдельную `cowrie_ingress`; к
 `prod_net` он не подключён. Если порты
 заняты, задайте `COWRIE_SSH_PORT` и `COWRIE_TELNET_PORT` в локальном `.env`.
-Порт хоста `22` не используется.
+Порт хоста `22` не используется. HTTP порт публикует отдельный
+`http-ingress`; основной Nginx и Target App остаются во внутренних сетях.
+Cowrie и Target App не имеют маршрута к хосту или внешним сетям. Проверки
+фактической изоляции выполняет `make test-runtime`.
 
 Для проверки Host используйте `curl -v -H 'Host: unknown.test'
 http://127.0.0.1:8080/health`: Nginx закрывает соединение без HTTP-ответа.
@@ -51,6 +55,7 @@ listener, SSH и Telnet.
 make test-runtime
 make test
 make quality
+make acceptance
 docker compose -f deploy/docker-compose.yml down
 ```
 

@@ -8,7 +8,7 @@
 
 ## Solution
 
-Создать локальный Docker Compose стенд с двумя изолированными зонами: `prod_net` для HTTP Nginx и Target App и `honeynet` для Cowrie. Узкий TCP ingress связывает отдельную host-facing сеть `cowrie_ingress` с Honeynet. По умолчанию публиковать HTTP, SSH и Telnet только на IPv4 loopback хоста. Закрепить минимальные права контейнеров, ограничить ресурсы, сохранить необходимые данные в named volumes, а сетевую изоляцию и основные сценарии проверять статическими и runtime-тестами.
+Создать локальный Docker Compose стенд с двумя изолированными зонами: `prod_net` для HTTP Nginx и Target App и `honeynet` для Cowrie. Узкие HTTP и TCP ingress связывают эти зоны с отдельными host-facing сетями. По умолчанию публиковать HTTP, SSH и Telnet только на IPv4 loopback хоста. Закрепить минимальные права контейнеров, ограничить ресурсы, сохранить необходимые данные в named volumes, а сетевую изоляцию и основные сценарии проверять статическими и runtime-тестами.
 
 Target App намеренно предоставляет контролируемые Command Injection, SQLi и Prompt Injection surfaces. Это лабораторная цель, не production-сервис. Target App не вызывает внешние LLM и не получает доступ к Honeynet или внешней сети.
 
@@ -21,7 +21,7 @@ Target App намеренно предоставляет контролируе�
 5. Как исследователь безопасности, я хочу подключаться к SSH-ловушке Cowrie на порту 2222, чтобы проверять регистрацию попыток аутентификации и команд.
 6. Как исследователь безопасности, я хочу подключаться к Telnet-ловушке Cowrie на порту 2223, чтобы проверять второй honeypot-протокол.
 7. Как оператор, я хочу отделить Cowrie от Target App сетями Docker, чтобы атака на один компонент не давала сетевой путь к другому.
-8. Как оператор, я хочу, чтобы Nginx подключался только к `prod_net`, чтобы reverse proxy не мог служить мостом между production-like зоной и Honeynet.
+8. Как оператор, я хочу, чтобы HTTP Nginx подключался только к внутренним `prod_net` и `http_edge`, чтобы reverse proxy не имел прямого host-facing маршрута или пути в Honeynet.
 9. Как владелец стенда, я хочу запрещать egress из сетей, чтобы скомпрометированные или намеренно уязвимые компоненты не атаковали внешние цели.
 10. Как разработчик, я хочу иметь синтетический каталог активов и SQLi surface, чтобы безопасно демонстрировать и тестировать инъекцию без реальных данных.
 11. Как исследователь, я хочу иметь ограниченный Command Injection surface, чтобы воспроизводить сценарии выполнения команд с timeout и ограниченным объёмом результата.
@@ -40,20 +40,20 @@ Target App намеренно предоставляет контролируе�
 ## Implementation Decisions
 
 - Платформа только локальный Docker Compose. K3s и Ansible не входят в Фазу 1.
-- Сервисы: HTTP Nginx, Target App (FastAPI), Cowrie и отдельный TCP ingress для SSH/Telnet. `management_net`, Fluent Bit и нормализация Событий безопасности относятся к следующей фазе.
-- Сети: `prod_net` содержит только HTTP Nginx и Target App; `honeynet` содержит Cowrie и TCP ingress и имеет `internal: true`; `cowrie_ingress` содержит только TCP ingress. Cowrie подключён только к `honeynet`. Используются только IPv4 CIDR; IPv6 отключается на Compose bridge, если поддерживается. Контейнеры не используют `network_mode: host`.
+- Сервисы: HTTP Nginx, Target App (FastAPI), Cowrie, отдельный HTTP ingress и TCP ingress для SSH/Telnet. `management_net`, Fluent Bit и нормализация Событий безопасности относятся к следующей фазе.
+- Сети: внутренние `prod_net` (Nginx и Target App), `honeynet` (Cowrie и TCP ingress) и `http_edge` (Nginx и HTTP ingress) используют изолированный IPv4 gateway. Host-facing `http_ingress` и `cowrie_ingress` содержат только соответствующие ingress-сервисы. Target App подключён только к `prod_net`, Cowrie — только к `honeynet`. Используются только IPv4 CIDR; IPv6 отключается на Compose bridge. Контейнеры не используют `network_mode: host`.
 - Топология входа:
 
   ```text
-  127.0.0.1:8080 -> nginx -> prod_net -> target-app:8000
+  127.0.0.1:8080 -> HTTP ingress -> http_edge -> nginx -> prod_net -> target-app:8000
   127.0.0.1:2222 -> TCP ingress -> honeynet -> cowrie:2222
   127.0.0.1:2223 -> TCP ingress -> honeynet -> cowrie:2223
   ```
 
-- Публикуются только HTTP `8080/tcp`, SSH `2222/tcp` и Telnet `2223/tcp`, через `${BIND_ADDRESS}` с default `127.0.0.1`. Target App и Cowrie не имеют `ports`; SSH/Telnet публикует только TCP ingress. TLS и host port 22 не используются. Режим `0.0.0.0` допустим только для изолированной лаборатории и сопровождается заметным предупреждением в runbook.
+- Публикуются только HTTP `8080/tcp`, SSH `2222/tcp` и Telnet `2223/tcp`, через `${BIND_ADDRESS}` с default `127.0.0.1`. Nginx, Target App и Cowrie не имеют `ports`; HTTP публикует только HTTP ingress, SSH/Telnet — только TCP ingress. TLS и host port 22 не используются. Режим `0.0.0.0` допустим только для изолированной лаборатории и сопровождается заметным предупреждением в runbook.
 - Основной Compose-манифест должен иметь один канонический путь в `deploy/` или `infrastructure/compose/`; допустим корневой симлинк. Выбранное имя и путь должны быть единообразно отражены в документации и тестовых командах.
 - Egress deny-by-default. У Cowrie нет пути в production-like, host или внешние сети. Target App не требует внешних зависимостей и не имеет egress. `internal: true` считается декларативной частью контроля, но не доказательством изоляции: требуется runtime-проверка.
-- HTTP Nginx выполняет только reverse proxy на `target-app:8000` и не подключается к Honeynet. Отдельный TCP ingress использует Nginx stream только для `cowrie:2222/2223`; он не подключается к `prod_net`. Неизвестный HTTP Host обрабатывается отдельным default server (ответ `444` или `400`); основной server разрешает `localhost`, `127.0.0.1` и `${SERVER_NAME:-localhost}`.
+- HTTP Nginx выполняет только reverse proxy на `target-app:8000` и не подключается к Honeynet. HTTP ingress передаёт TCP-поток с PROXY protocol на Nginx; основной Nginx доверяет наблюдаемому ingress-адресу только из `http_edge`. Отдельный TCP ingress использует Nginx stream только для `cowrie:2222/2223`; он не подключается к `prod_net`. Неизвестный HTTP Host обрабатывается отдельным default server (ответ `444` или `400`); основной server разрешает `localhost`, `127.0.0.1` и `${SERVER_NAME:-localhost}`.
 - Nginx генерирует новый `$request_id` для каждого запроса, перезаписывает клиентский `X-Request-ID` и передаёт собственное значение Target App. Target App возвращает correlation ID в response header и response body, если это совместимо с контрактом конкретного endpoint, и включает ID в JSON-логи. Пересылка client IP и доверие к forwarded headers должны быть явно ограничены Nginx; произвольным клиентским forwarded headers доверять нельзя.
 - Nginx и Target App запускаются non-root. Для обоих: `cap_drop: [ALL]`, `no-new-privileges: true`, отсутствие `privileged`, Docker socket и host networking. Target App использует UID `10001`; Nginx — встроенного unprivileged-пользователя выбранного образа.
 - Resource limits: Nginx `cpus: "0.25"`, `mem_limit: 128m`, `pids_limit: 50`; Target App `cpus: "0.5"`, `mem_limit: 512m`, `pids_limit: 100`.
@@ -64,7 +64,7 @@ Target App намеренно предоставляет контролируе�
 - SQLi surface: `GET /search?q=...` и `POST /api/search`; таблица `assets` содержит синтетические `id`, `hostname`, `ip_address`, `status`, `description`. Prompt Injection surface — `POST /api/analyze` с JSON-полем `text`; вход валидируется и логируется событием `PROMPT_INPUT_RECEIVED`, status `RECEIVED`. Внешние и локальные LLM не вызываются.
 - Контролируемый Command Injection endpoint принимает лабораторную цель, выполняет ping и возвращает ограниченный stdout/stderr. Он не должен быть доступен из Honeynet или извне в обход Nginx.
 - Cowrie image tag/digest должен быть pinned до реализации. Выбранный образ проверяется на совместимость с read-only rootfs, writable paths, non-root и согласованными security options; точный pin пока не утвержден в интервью и должен быть оформлен как implementation decision до merge.
-- Healthchecks: Cowrie TCP `2222` и `2223`; Target App `GET /health` внутри `prod_net`; Nginx проверяет проксируемый `/health` через опубликованный HTTP endpoint. Используется `depends_on: condition: service_healthy`, если поддерживается выбранной версией Compose. Все сервисы имеют `restart: unless-stopped`.
+- Healthchecks: Cowrie TCP `2222` и `2223`; Target App `GET /health` внутри `prod_net`; Nginx проверяет проксируемый `/health` через отдельный loopback listener; HTTP ingress проверяет опубликованный `/health`, TCP ingress проверяет конфигурацию без создания фиктивных сессий Cowrie. Используется `depends_on: condition: service_healthy`. Все сервисы имеют `restart: unless-stopped`.
 - Статические Pytest policy checks читают нормализованную Compose-конфигурацию и проверяют сети и их состав, публикацию портов и default binding, отсутствие прямого порта Target App, `internal: true`, IPv4 CIDR, non-root, capabilities, resource limits, healthchecks, Docker socket, privileged и host networking.
 - Runtime integration checks проверяют обе стороны изоляции: Cowrie не разрешает Target App/Nginx и не достигает IP `prod_net`; Target App не разрешает Cowrie и не достигает Honeynet портов/подсети. Проверяются DNS-имена и IP адреса. Каждая probe ограничена timeout 2 секунды. Для egress проверки не используются нестабильные публичные endpoints как единственный oracle.
 - Если в целевых образах отсутствуют инструменты probes, runtime harness может использовать одноразовый тестовый контейнер, подключённый к проверяемой сети, без изменения Cowrie/Target App образа. Приёмочный тест обязан доказать фактическую недоступность соседних и внешних маршрутов; сам механизм harness документируется и не расширяет capabilities сервисов.
@@ -101,5 +101,6 @@ Target App намеренно предоставляет контролируе�
 - Канонические термины и ограничения задаются `CONTEXT.md`; Target App и Honeynet нельзя описывать как production-компоненты.
 - Источник требований интервью — `docs/spec/phase-1-interview-notes.md`; критерии приемки состоят из 22 пунктов, указанных там.
 - Решения Issue #19 зафиксированы в `docs/architecture/decisions/phase-1-runtime-baseline.md`: канонический Compose path `deploy/docker-compose.yml`, immutable Cowrie digest, поведение `/health` и неизвестного Host (`444`), JSON error contract, обработка `X-Request-ID` и локальный Pytest/Docker CLI harness.
+- Топология и проверки отсутствия egress из Issue #27 зафиксированы в `docs/architecture/decisions/phase-1-runtime-isolation.md`; этот ADR уточняет исторические схемы с четырьмя сервисами.
 - Network isolation тесты должны исполняться на поддерживаемых локальных Docker окружениях. Для сетевой модели `internal: true` нельзя заявлять запрет доступа к хосту только на основании статической конфигурации; нужные направления подтверждаются runtime.
 - Публикация с `BIND_ADDRESS=0.0.0.0` существенно меняет риск-профиль. Она допустима только на отдельной изолированной сети, с явным операторским решением и проверкой адреса перед запуском.

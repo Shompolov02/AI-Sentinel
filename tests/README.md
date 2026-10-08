@@ -12,6 +12,14 @@
 plugin; работающий Docker Engine для этих статических тестов не требуется.
 Набор автоматически входит в `make test`, `make quality` и CI Tests.
 
+`make test-runtime` запускает единый Docker Compose harness: поднимает стенд
+под отдельным project name, ждёт healthy всех сервисов, проверяет loopback
+входы, DNS/TCP/egress из Cowrie и Target App и сохранность named volumes.
+При ошибке harness печатает статус и журналы перед очисткой; Docker Engine и
+Compose обязательны, silent skip исключён. `make acceptance` запускает
+`make quality`, затем `make test-runtime`. В CI runtime job обязателен наряду с
+остальными quality jobs.
+
 Привилегированные сетевые проверки и активное реагирование выполняются только в явно выделенной тестовой среде.
 
 ## Поведенческий стандарт

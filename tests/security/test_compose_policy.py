@@ -23,6 +23,8 @@ COMPOSE_DEFAULTS = {
     "PROD_NET_SUBNET",
     "HONEYNET_SUBNET",
     "COWRIE_INGRESS_SUBNET",
+    "HTTP_EDGE_SUBNET",
+    "HTTP_INGRESS_SUBNET",
 }
 COWRIE_PIN = (
     "cowrie/cowrie:3.0.15@sha256:"
@@ -67,6 +69,8 @@ def test_all_compose_networks_have_disjoint_ipv4_cidrs(
         "prod_net": ipaddress.IPv4Network("172.30.10.0/24"),
         "honeynet": ipaddress.IPv4Network("172.30.20.0/24"),
         "cowrie_ingress": ipaddress.IPv4Network("172.30.30.0/24"),
+        "http_edge": ipaddress.IPv4Network("172.30.40.0/24"),
+        "http_ingress": ipaddress.IPv4Network("172.30.50.0/24"),
     }
     actual = {}
     for name, network in compose_model["networks"].items():
@@ -90,6 +94,7 @@ def test_every_compose_service_declares_non_root_user(
     compose_model: dict[str, Any],
 ) -> None:
     expected_users = {
+        "http-ingress": "101",
         "nginx": "101",
         "target-app": "10001:10001",
         "cowrie-ingress": "101",
@@ -106,7 +111,8 @@ def test_compose_has_only_the_accepted_services_and_network_attachments(
     compose_model: dict[str, Any],
 ) -> None:
     expected = {
-        "nginx": {"prod_net"},
+        "http-ingress": {"http_ingress", "http_edge"},
+        "nginx": {"prod_net", "http_edge"},
         "target-app": {"prod_net"},
         "cowrie-ingress": {"honeynet", "cowrie_ingress"},
         "cowrie": {"honeynet"},
@@ -116,6 +122,8 @@ def test_compose_has_only_the_accepted_services_and_network_attachments(
         "prod_net",
         "honeynet",
         "cowrie_ingress",
+        "http_edge",
+        "http_ingress",
     }, "unexpected Compose network, including management_net"
     for name, networks in expected.items():
         actual = set(compose_model["services"][name]["networks"])
@@ -123,16 +131,34 @@ def test_compose_has_only_the_accepted_services_and_network_attachments(
     assert compose_model["networks"]["honeynet"].get("internal") is True, (
         "honeynet must remain internal"
     )
+    for name in ("prod_net", "http_edge"):
+        assert compose_model["networks"][name].get("internal") is True, (
+            f"{name} must remain internal"
+        )
     assert (
         compose_model["networks"]["cowrie_ingress"].get("internal", False) is False
     ), "cowrie_ingress must publish host ports"
+    assert compose_model["networks"]["http_ingress"].get("internal", False) is False, (
+        "http_ingress must publish host ports"
+    )
+
+
+def test_workload_networks_have_no_host_gateway(
+    compose_model: dict[str, Any],
+) -> None:
+    for name in ("prod_net", "honeynet", "http_edge"):
+        network = compose_model["networks"][name]
+        assert network["internal"] is True, f"{name}: external route forbidden"
+        assert network["driver_opts"] == {
+            "com.docker.network.bridge.gateway_mode_ipv4": "isolated"
+        }, f"{name}: host bridge gateway forbidden"
 
 
 def test_only_three_expected_tcp_ports_are_published_on_loopback(
     compose_model: dict[str, Any],
 ) -> None:
     expected = {
-        ("nginx", "127.0.0.1", "8080", 8080, "tcp"),
+        ("http-ingress", "127.0.0.1", "8080", 8080, "tcp"),
         ("cowrie-ingress", "127.0.0.1", "2222", 2222, "tcp"),
         ("cowrie-ingress", "127.0.0.1", "2223", 2223, "tcp"),
     }
@@ -148,7 +174,7 @@ def test_only_three_expected_tcp_ports_are_published_on_loopback(
         for port in service.get("ports", [])
     }
     assert actual == expected, f"host port policy violated: {actual ^ expected}"
-    for name in ("target-app", "cowrie"):
+    for name in ("nginx", "target-app", "cowrie"):
         assert not compose_model["services"][name].get("ports"), (
             f"{name}: direct host mapping forbidden"
         )
@@ -185,6 +211,7 @@ def test_read_only_services_have_only_documented_writable_paths(
 ) -> None:
     services = compose_model["services"]
     expected_tmpfs = {
+        "http-ingress": {"/tmp:rw,noexec,nosuid,size=16m"},  # noqa: S108
         "target-app": {"/tmp:rw,noexec,nosuid,size=64m"},  # noqa: S108
         "cowrie-ingress": {"/tmp:rw,noexec,nosuid,size=16m"},  # noqa: S108
         "cowrie": {"/cowrie/cowrie-git/var:rw,noexec,nosuid,size=64m,uid=999,gid=999"},
@@ -194,19 +221,24 @@ def test_read_only_services_have_only_documented_writable_paths(
         assert set(services[name].get("tmpfs", [])) == tmpfs, (
             f"{name}: tmpfs differs from documented writable path"
         )
-    ingress_mounts = services["cowrie-ingress"]["volumes"]
-    assert len(ingress_mounts) == 1, "cowrie-ingress: only config bind allowed"
-    assert ingress_mounts[0]["type"] == "bind", "cowrie-ingress: config must be a bind"
-    assert ingress_mounts[0]["target"] == "/etc/nginx/cowrie-ingress.conf"
-    assert ingress_mounts[0]["read_only"] is True, (
-        "cowrie-ingress: config bind must be read-only"
-    )
+    for name, path in (
+        ("http-ingress", "/etc/nginx/http-ingress.conf"),
+        ("cowrie-ingress", "/etc/nginx/cowrie-ingress.conf"),
+    ):
+        ingress_mounts = services[name]["volumes"]
+        assert len(ingress_mounts) == 1, f"{name}: only config bind allowed"
+        assert ingress_mounts[0]["type"] == "bind", f"{name}: config must be a bind"
+        assert ingress_mounts[0]["target"] == path
+        assert ingress_mounts[0]["read_only"] is True, (
+            f"{name}: config bind must be read-only"
+        )
 
 
 def test_service_resources_match_phase_one_limits(
     compose_model: dict[str, Any],
 ) -> None:
     expected = {
+        "http-ingress": (0.25, "134217728", 50),
         "nginx": (0.25, "134217728", 50),
         "target-app": (0.5, "536870912", 100),
         "cowrie-ingress": (0.25, "134217728", 50),
@@ -233,9 +265,11 @@ def test_healthchecks_restarts_and_healthy_dependencies(
             f"{name}: restart must be unless-stopped"
         )
     expected_checks = {
-        "nginx": ("CMD-SHELL", "/health", "8080"),
+        "nginx": ("CMD-SHELL", "/health", "8081"),
+        "http-ingress": ("CMD-SHELL", "/health", "8080"),
         "target-app": ("CMD", "/health", "8000"),
         "cowrie": ("CMD", "2222", "2223"),
+        "cowrie-ingress": ("CMD", "nginx", "cowrie-ingress.conf"),
     }
     for name, (kind, first, second) in expected_checks.items():
         check = services[name].get("healthcheck", {})
@@ -250,6 +284,10 @@ def test_healthchecks_restarts_and_healthy_dependencies(
     assert (
         services["nginx"]["depends_on"]["target-app"]["condition"] == "service_healthy"
     ), "nginx must wait for a healthy Target App"
+    assert (
+        services["http-ingress"]["depends_on"]["nginx"]["condition"]
+        == "service_healthy"
+    ), "http-ingress must wait for healthy Nginx"
     assert services["cowrie-ingress"]["depends_on"]["cowrie"]["condition"] == (
         "service_healthy"
     ), "cowrie-ingress must wait for healthy Cowrie"
@@ -259,6 +297,7 @@ def test_named_volumes_have_only_expected_service_attachments(
     compose_model: dict[str, Any],
 ) -> None:
     expected = {
+        "http-ingress": {},
         "nginx": {"nginx-logs": ("/var/log/nginx", False)},
         "target-app": {"target-app-data": ("/app/target_app/data", False)},
         "cowrie-ingress": {},
@@ -277,7 +316,7 @@ def test_named_volumes_have_only_expected_service_attachments(
     }, "named volume declaration differs from policy"
     for name, attachments in expected.items():
         mounts = compose_model["services"][name].get("volumes", [])
-        if name != "cowrie-ingress":
+        if name not in ("http-ingress", "cowrie-ingress"):
             assert len(mounts) == len(attachments), (
                 f"{name}: extra writable mount outside documented exceptions"
             )

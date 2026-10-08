@@ -28,7 +28,13 @@ def test_cowrie_compose_exposes_only_isolated_loopback_listeners() -> None:
     cowrie = model["services"]["cowrie"]
 
     assert cowrie["image"] == PIN
-    assert set(model["networks"]) == {"prod_net", "honeynet", "cowrie_ingress"}
+    assert set(model["networks"]) == {
+        "prod_net",
+        "honeynet",
+        "cowrie_ingress",
+        "http_edge",
+        "http_ingress",
+    }
     ingress = model["services"]["cowrie-ingress"]
     assert "ports" not in cowrie
     assert ingress["ports"] == [
