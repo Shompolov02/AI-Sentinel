@@ -25,6 +25,7 @@ server {
     listen 8080 proxy_protocol;
     server_name localhost 127.0.0.1 ${SERVER_NAME};
     access_log /var/log/nginx/access.log json_access;
+    client_max_body_size 2M;
 
     location / {
         proxy_pass http://target-app:8000;
