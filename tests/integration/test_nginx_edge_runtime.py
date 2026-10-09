@@ -356,6 +356,28 @@ def test_published_edge_routes_http_and_rejects_unknown_host(runtime: Runtime) -
 
 
 @pytest.mark.runtime
+def test_edge_accepts_body_below_two_mib_and_rejects_larger_body(
+    runtime: Runtime,
+) -> None:
+    payload = b'{"text":"synthetic"}'
+    with httpx.Client(base_url=runtime.base_url, timeout=10, trust_env=False) as client:
+        accepted = client.post(
+            "/api/analyze",
+            content=payload + b" " * (1_500_000 - len(payload)),
+            headers={"Content-Type": "application/json"},
+        )
+        rejected = client.post(
+            "/api/analyze",
+            content=payload + b" " * (2 * 1024 * 1024 + 1 - len(payload)),
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert accepted.status_code == 200
+    assert accepted.json()["status"] == "RECEIVED"
+    assert rejected.status_code == 413
+
+
+@pytest.mark.runtime
 def test_edge_overwrites_spoofed_headers_and_correlates_logs(runtime: Runtime) -> None:
     spoofed_ip = "203.0.113.254"
     with httpx.Client(base_url=runtime.base_url, timeout=5, trust_env=False) as client:
