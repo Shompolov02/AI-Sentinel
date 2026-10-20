@@ -1,0 +1,34 @@
+from __future__ import annotations
+
+from typing import Annotated, Literal
+from uuid import UUID
+
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, IPvAnyAddress
+
+Text = Annotated[str, Field(min_length=1, max_length=256)]
+Port = Annotated[int, Field(strict=True, ge=1, le=65535)]
+
+
+class Login(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    username: Text
+    outcome: Literal["failure"]
+    password_length: Annotated[int, Field(strict=True, ge=0, le=65535)]
+
+
+class Event(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    schema_version: Annotated[int, Field(strict=True, ge=1, le=1)]
+    event_id: UUID
+    occurred_at: AwareDatetime
+    received_at: AwareDatetime
+    event_type: Literal["login_attempt"]
+    cowrie_event_type: Literal["cowrie.login.failed"]
+    sensor_id: Text
+    session_id: Text
+    source_ip: IPvAnyAddress
+    source_port: Port
+    protocol: Literal["ssh", "telnet"]
+    destination_port: Port
+    raw_record_ref: Text
+    login: Login

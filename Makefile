@@ -2,19 +2,22 @@
 
 UV ?= uv
 UVX ?= uvx
+# Isolated scanner tools do not yet support the system Python 3.14.
+SECURITY_PYTHON ?= 3.11
 RUFF := $(UV) run ruff
 MYPY := $(UV) run mypy
 PYTEST := $(UV) run pytest
-SEMGREP := $(UVX) --from semgrep==1.136.0 --with 'setuptools<81' semgrep
+SEMGREP := $(UVX) --python $(SECURITY_PYTHON) --from semgrep==1.136.0 --with 'setuptools<81' semgrep
 GITLEAKS ?= gitleaks
 TRIVY ?= trivy
 DOCKER ?= docker
 SMOKE_IMAGE ?= ai-sentinel-smoke:security-scan
+CORE_IMAGE ?= ai-sentinel-core:security-scan
 REPORT_DIR ?= .artifacts
 GIT_SHA ?= $(shell git rev-parse HEAD)
 LOCK_SHA256 ?= $(shell (sha256sum uv.lock 2>/dev/null || shasum -a 256 uv.lock) | awk '{print $$1}')
 
-.PHONY: bootstrap audit-metadata format format-check lint typecheck test test-runtime sast sca secrets security-exceptions smoke-image container-check sbom quality acceptance
+.PHONY: bootstrap audit-metadata format format-check lint typecheck test test-runtime test-core-runtime sast sca secrets security-exceptions smoke-image core-image container-check sbom quality acceptance
 
 bootstrap:
 	$(UV) lock --check
@@ -42,12 +45,15 @@ test: audit-metadata
 test-runtime:
 	AI_SENTINEL_REQUIRE_DOCKER=1 $(PYTEST) -q -m runtime
 
+test-core-runtime:
+	AI_SENTINEL_REQUIRE_DOCKER=1 $(PYTEST) -q -m runtime tests/integration/test_core_runtime.py
+
 sast: audit-metadata
 	$(SEMGREP) scan --config p/python --config .semgrep.yml --error --exclude tests/security/fixtures --sarif --output $(REPORT_DIR)/semgrep.sarif .
 	@set +e; $(SEMGREP) scan --config p/python --config .semgrep.yml --error tests/security/fixtures/semgrep-unsafe.py >/dev/null 2>&1; scan_exit=$$?; set -e; test $$scan_exit -eq 1 || (echo "Semgrep unsafe fixture was not rejected (exit $$scan_exit)" >&2; exit 1)
 
 sca: audit-metadata
-	$(UV) export --locked --no-emit-project --format requirements-txt | $(UVX) --from pip-audit==2.9.0 pip-audit --strict --format json --output $(REPORT_DIR)/pip-audit.json -r /dev/stdin
+	$(UV) export --locked --no-emit-project --format requirements-txt | $(UVX) --python $(SECURITY_PYTHON) --from pip-audit==2.9.0 pip-audit --strict --format json --output $(REPORT_DIR)/pip-audit.json -r /dev/stdin
 
 secrets:
 	@command -v gitleaks >/dev/null || (echo "secrets requires gitleaks" >&2; exit 1)
@@ -61,7 +67,10 @@ smoke-image: audit-metadata
 	@command -v docker >/dev/null || (echo "smoke-image requires docker" >&2; exit 1)
 	$(DOCKER) build --file infrastructure/docker/Dockerfile --tag $(SMOKE_IMAGE) --label org.opencontainers.image.revision=$(GIT_SHA) --label org.ai-sentinel.lock-sha256=$(LOCK_SHA256) .
 
-container-check: smoke-image
+core-image: audit-metadata
+	$(DOCKER) build --file services/core/Dockerfile --tag $(CORE_IMAGE) --label org.opencontainers.image.revision=$(GIT_SHA) --label org.ai-sentinel.lock-sha256=$(LOCK_SHA256) .
+
+container-check: smoke-image core-image
 	@command -v trivy >/dev/null || (echo "container-check requires trivy" >&2; exit 1)
 	@command -v docker >/dev/null || (echo "container-check requires docker" >&2; exit 1)
 	docker compose -f infrastructure/compose/smoke.yaml config --quiet
@@ -70,6 +79,8 @@ container-check: smoke-image
 	$(TRIVY) config --format json --output $(REPORT_DIR)/trivy-config.json --exit-code 1 --severity HIGH,CRITICAL infrastructure
 	@set +e; $(TRIVY) config --exit-code 42 --severity HIGH,CRITICAL tests/security/fixtures/container-policy-unsafe/Dockerfile >/dev/null 2>&1; scan_exit=$$?; set -e; test $$scan_exit -eq 42 || (echo "Trivy unsafe container-policy fixture was not rejected (exit $$scan_exit)" >&2; exit 1)
 	$(TRIVY) image --scanners vuln --format json --output $(REPORT_DIR)/trivy-image.json --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed $(SMOKE_IMAGE)
+	$(TRIVY) config --format json --output $(REPORT_DIR)/trivy-core-config.json --exit-code 1 --severity HIGH,CRITICAL services/core
+	$(TRIVY) image --scanners vuln --format json --output $(REPORT_DIR)/trivy-core-image.json --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed $(CORE_IMAGE)
 
 sbom: smoke-image
 	@command -v trivy >/dev/null || (echo "sbom requires trivy" >&2; exit 1)

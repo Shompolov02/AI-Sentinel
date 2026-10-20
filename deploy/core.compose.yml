@@ -1,0 +1,118 @@
+# Optional Core slice: combine with deploy/docker-compose.yml. Secrets are mandatory.
+services:
+  core:
+    build:
+      context: ..
+      dockerfile: services/core/Dockerfile
+    image: ai-sentinel-core:local
+    user: "10001:10001"
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: "0.5"
+    mem_limit: 256m
+    pids_limit: 64
+    environment:
+      CORE_DB_PATH: /data/core.db
+      CORE_TOKENS_FILE: /run/secrets/collector-tokens
+      CORE_PASSWORD_HASH_FILE: /run/secrets/password-hash
+    volumes:
+      - core-data:/data
+      - ${CORE_SECRETS_DIR:?Set CORE_SECRETS_DIR}/collector-tokens:/run/secrets/collector-tokens:ro
+      - ${CORE_SECRETS_DIR:?Set CORE_SECRETS_DIR}/password-hash:/run/secrets/password-hash:ro
+    networks: [core_management]
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health',timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  core-intake:
+    image: ai-sentinel-nginx:local
+    build:
+      context: ..
+      dockerfile: deploy/nginx/Dockerfile
+    user: "101"
+    entrypoint: [nginx]
+    command: ["-c", "/etc/nginx/core.conf", "-g", "daemon off;"]
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: "0.25"
+    mem_limit: 64m
+    pids_limit: 50
+    volumes:
+      - ./core/intake.conf:/etc/nginx/core.conf:ro
+      - ${CORE_SECRETS_DIR:?}/intake.crt:/run/secrets/intake.crt:ro
+      - ${CORE_SECRETS_DIR:?}/intake.key:/run/secrets/intake.key:ro
+    networks: [core_ingest, core_management]
+    depends_on:
+      core:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "nginx", "-t", "-c", "/etc/nginx/core.conf"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  core-page:
+    image: ai-sentinel-nginx:local
+    build:
+      context: ..
+      dockerfile: deploy/nginx/Dockerfile
+    user: "101"
+    entrypoint: [nginx]
+    command: ["-c", "/etc/nginx/core.conf", "-g", "daemon off;"]
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: "0.25"
+    mem_limit: 64m
+    pids_limit: 50
+    ports:
+      - "${CORE_BIND_ADDRESS:?Set CORE_BIND_ADDRESS}:${CORE_HTTP_PORT:-8082}:8082"
+    volumes:
+      - ./core/page.conf:/etc/nginx/core.conf:ro
+    networks: [core_management, core_http_ingress]
+    depends_on:
+      core:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8082/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  core-data:
+
+networks:
+  core_ingest:
+    internal: true
+    enable_ipv6: false
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
+    ipam:
+      config:
+        - subnet: ${CORE_INGEST_SUBNET:-172.30.60.0/24}
+  core_management:
+    internal: true
+    enable_ipv6: false
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
+    ipam:
+      config:
+        - subnet: ${CORE_MANAGEMENT_SUBNET:-172.30.70.0/24}
+  core_http_ingress:
+    internal: false
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: ${CORE_HTTP_INGRESS_SUBNET:-172.30.80.0/24}
