@@ -1,7 +1,7 @@
 # Runbook: первый срез Core (#45)
 
 Сценарий: синтетический нормализованный отказ входа → TLS-приём → номер задачи →
-обоснованный Low и Evidence на HTTP-странице SecOps. Реальный сборщик Cowrie,
+обоснованный Low и Evidence на HTTP-странице SecOps. Реальный сборщик Cowrie описан в [runbook #46](cowrie-collector.md);
 серии входов, команды, LLM и очистка по сроку реализуются в следующих issues #44.
 Core принимает только отказ входа; другие типы отклоняются, а не получают Low.
 Данные задач и аудита сохраняются в SQLite на `core-data`; резервной копии нет.
@@ -193,3 +193,6 @@ docker compose -f deploy/docker-compose.yml -f deploy/core.compose.yml down
 вернуться к прежнему checkout и использовать обычный Phase 1 Compose без overlay.
 Не запускайте одновременно два project с одинаковыми подсетями. Команда `down -v`
 для рабочего стенда удалит задачи, Evidence и аудит; runbook её не требует.
+
+`make test-core-runtime` также запускает девятисервисный вариант со сборщиком
+из [runbook #46](cowrie-collector.md), используя отдельный тестовый project.

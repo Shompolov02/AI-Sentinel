@@ -137,6 +137,9 @@ class Store:
                     db, now, "processing", "Core", task_id, {"state": "processing"}
                 )
         event = json.loads(row["event"])
+        if event["login"]["outcome"] == "success":
+            self.fail(task_id, now, "login_success_policy_pending_47")
+            return
         evidence_id = str(uuid4())
         evidence = [
             {
@@ -179,7 +182,7 @@ class Store:
             )
             self.audit(db, now, "completed", "Core", task_id, {"state": "completed"})
 
-    def fail(self, task_id: str, now: float) -> None:
+    def fail(self, task_id: str, now: float, reason: str = "analysis_error") -> None:
         with self.connection() as db:
             db.execute(
                 "UPDATE tasks SET state = 'failed' "
@@ -192,7 +195,7 @@ class Store:
                 "failed",
                 "Core",
                 task_id,
-                {"state": "failed", "reason": "analysis_error"},
+                {"state": "failed", "reason": reason},
             )
 
     def task(self, task_id: str) -> dict[str, Any]:

@@ -13,11 +13,12 @@ TRIVY ?= trivy
 DOCKER ?= docker
 SMOKE_IMAGE ?= ai-sentinel-smoke:security-scan
 CORE_IMAGE ?= ai-sentinel-core:security-scan
+COLLECTOR_IMAGE ?= ai-sentinel-collector:security-scan
 REPORT_DIR ?= .artifacts
 GIT_SHA ?= $(shell git rev-parse HEAD)
 LOCK_SHA256 ?= $(shell (sha256sum uv.lock 2>/dev/null || shasum -a 256 uv.lock) | awk '{print $$1}')
 
-.PHONY: bootstrap audit-metadata format format-check lint typecheck test test-runtime test-core-runtime sast sca secrets security-exceptions smoke-image core-image container-check sbom quality acceptance
+.PHONY: bootstrap audit-metadata format format-check lint typecheck test test-runtime test-core-runtime sast sca secrets security-exceptions smoke-image core-image collector-image container-check sbom quality acceptance
 
 bootstrap:
 	$(UV) lock --check
@@ -70,7 +71,10 @@ smoke-image: audit-metadata
 core-image: audit-metadata
 	$(DOCKER) build --file services/core/Dockerfile --tag $(CORE_IMAGE) --label org.opencontainers.image.revision=$(GIT_SHA) --label org.ai-sentinel.lock-sha256=$(LOCK_SHA256) .
 
-container-check: smoke-image core-image
+collector-image: audit-metadata
+	$(DOCKER) build --file services/collector/Dockerfile --tag $(COLLECTOR_IMAGE) --label org.opencontainers.image.revision=$(GIT_SHA) --label org.ai-sentinel.lock-sha256=$(LOCK_SHA256) .
+
+container-check: smoke-image core-image collector-image
 	@command -v trivy >/dev/null || (echo "container-check requires trivy" >&2; exit 1)
 	@command -v docker >/dev/null || (echo "container-check requires docker" >&2; exit 1)
 	docker compose -f infrastructure/compose/smoke.yaml config --quiet
@@ -81,6 +85,8 @@ container-check: smoke-image core-image
 	$(TRIVY) image --scanners vuln --format json --output $(REPORT_DIR)/trivy-image.json --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed $(SMOKE_IMAGE)
 	$(TRIVY) config --format json --output $(REPORT_DIR)/trivy-core-config.json --exit-code 1 --severity HIGH,CRITICAL services/core
 	$(TRIVY) image --scanners vuln --format json --output $(REPORT_DIR)/trivy-core-image.json --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed $(CORE_IMAGE)
+	$(TRIVY) config --format json --output $(REPORT_DIR)/trivy-collector-config.json --exit-code 1 --severity HIGH,CRITICAL services/collector
+	$(TRIVY) image --scanners vuln --format json --output $(REPORT_DIR)/trivy-collector-image.json --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed $(COLLECTOR_IMAGE)
 
 sbom: smoke-image
 	@command -v trivy >/dev/null || (echo "sbom requires trivy" >&2; exit 1)

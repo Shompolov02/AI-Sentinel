@@ -1,2 +1,2 @@
 #!/bin/sh
-printf '%s\n' 'lab-only-password'
+printf '%s\n' "${AI_SENTINEL_TEST_PASSWORD:-lab-only-password}"
