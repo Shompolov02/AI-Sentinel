@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<p>Лабораторная страница SecOps. Доступ по HTTP.</p>
+<section>
+<form id="login">
+<label>Пароль <input id="password" type="password"
+ autocomplete="current-password" required maxlength="4096"></label>
+<button>Войти</button><p id="message" role="alert"></p>
+</form>
+</section>
+<script src="/login.js" defer></script>
+{% endblock %}
