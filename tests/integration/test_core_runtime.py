@@ -9,6 +9,7 @@ import socket
 import subprocess
 import sys
 import time
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
@@ -41,15 +42,24 @@ def test_core_tls_to_page_persists_on_volume_and_keeps_cowrie_isolated(
     (secret_dir / "collector-tokens").write_text(
         "synthetic-collector-token-for-tests\n"
     )
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
+    ports = []
+    with ExitStack() as reservations:
+        for _ in range(4):
+            sock = reservations.enter_context(socket.socket())
+            sock.bind(("127.0.0.1", 0))
+            ports.append(sock.getsockname()[1])
+    port, http_port, ssh_port, telnet_port = ports
     project = "aisentinel45-" + uuid4().hex[:8]
     environment = {
         **os.environ,
         "CORE_SECRETS_DIR": str(secret_dir),
         "CORE_BIND_ADDRESS": "127.0.0.1",
         "CORE_HTTP_PORT": str(port),
+        "BIND_ADDRESS": "127.0.0.1",
+        "HTTP_PORT": str(http_port),
+        "COWRIE_SSH_PORT": str(ssh_port),
+        "COWRIE_TELNET_PORT": str(telnet_port),
+        "SERVER_NAME": "sentinel.test",
     }
     command = [
         docker,
@@ -136,12 +146,14 @@ except URLError:
             if os.environ.get("AI_SENTINEL_RUNTIME_REUSE_IMAGES") == "1"
             else "--build",
             "--wait",
-            "core-page",
-            "core-intake",
-            "cowrie",
             timeout=360,
         )
         assert start.returncode == 0, start.stdout + start.stderr
+        status = compose("ps", "--format", "json")
+        assert status.returncode == 0, status.stderr
+        services = [json.loads(line) for line in status.stdout.splitlines() if line]
+        assert len(services) == 8, "Core runbook must start the full combined stand"
+        assert all(service["Health"] == "healthy" for service in services)
         assert collect(EVENT, authorized=False)["status"] == 401
         assert collect(EVENT, verify=False)["status"] == "tls_rejected"
         accepted = collect(EVENT)
@@ -198,22 +210,26 @@ except URLError:
                 ].values()
             ]
             for address in addresses:
-                probe = compose(
-                    "exec",
-                    "-T",
-                    "cowrie",
-                    "/cowrie/cowrie-env/bin/python3",
-                    "-c",
-                    "import socket,sys\ntry:\n"
-                    " socket.create_connection((sys.argv[1],int(sys.argv[2])),2)\n"
-                    "except OSError:\n print('isolated')\nelse:\n"
-                    " raise SystemExit('unexpected reachability')",
-                    address,
-                    str(target_port),
-                )
-                assert probe.returncode == 0 and "isolated" in probe.stdout, (
-                    probe.stderr
-                )
+                for source, python in (
+                    ("cowrie", "/cowrie/cowrie-env/bin/python3"),
+                    ("target-app", "python"),
+                ):
+                    probe = compose(
+                        "exec",
+                        "-T",
+                        source,
+                        python,
+                        "-c",
+                        "import socket,sys\ntry:\n"
+                        " socket.create_connection((sys.argv[1],int(sys.argv[2])),2)\n"
+                        "except OSError:\n print('isolated')\nelse:\n"
+                        " raise SystemExit('unexpected reachability')",
+                        address,
+                        str(target_port),
+                    )
+                    assert probe.returncode == 0 and "isolated" in probe.stdout, (
+                        probe.stderr
+                    )
     finally:
         diagnostics = compose("logs", "--tail", "30")
         print(diagnostics.stdout, file=sys.stderr)
