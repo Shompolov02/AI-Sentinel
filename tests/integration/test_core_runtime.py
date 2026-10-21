@@ -23,8 +23,10 @@ from core_fixtures import EVENT, TEST_VERIFIER  # noqa: E402
 
 
 @pytest.mark.runtime
+@pytest.mark.parametrize("with_collector", [False, True], ids=["synthetic", "cowrie"])
 def test_core_tls_to_page_persists_on_volume_and_keeps_cowrie_isolated(
     tmp_path: Path,
+    with_collector: bool,
 ) -> None:
     docker = shutil.which("docker")
     assert docker is not None, "Docker is required"
@@ -60,6 +62,7 @@ def test_core_tls_to_page_persists_on_volume_and_keeps_cowrie_isolated(
         "COWRIE_SSH_PORT": str(ssh_port),
         "COWRIE_TELNET_PORT": str(telnet_port),
         "SERVER_NAME": "sentinel.test",
+        "COWRIE_SENSOR_ID": "cowrie-runtime",
     }
     command = [
         docker,
@@ -71,6 +74,9 @@ def test_core_tls_to_page_persists_on_volume_and_keeps_cowrie_isolated(
         "-f",
         "deploy/core.compose.yml",
     ]
+
+    if with_collector:
+        command.extend(["-f", "deploy/collector.compose.yml"])
 
     def compose(*args: str, timeout: int = 60) -> subprocess.CompletedProcess[str]:
         return subprocess.run(  # noqa: S603
@@ -152,7 +158,9 @@ except URLError:
         status = compose("ps", "--format", "json")
         assert status.returncode == 0, status.stderr
         services = [json.loads(line) for line in status.stdout.splitlines() if line]
-        assert len(services) == 8, "Core runbook must start the full combined stand"
+        assert len(services) == (9 if with_collector else 8), (
+            "Core runbook must start the full combined stand"
+        )
         assert all(service["Health"] == "healthy" for service in services)
         assert collect(EVENT, authorized=False)["status"] == 401
         assert collect(EVENT, verify=False)["status"] == "tls_rejected"
@@ -189,10 +197,13 @@ except URLError:
             assert recreated.returncode == 0, recreated.stderr
             assert client.get(f"/api/tasks/{task_id}").json() == task
             assert collect(EVENT)["body"]["task_id"] == task_id
+        if with_collector:
+            _verify_collection(compose, ssh_port, telnet_port, url)
         for host, target_port in (
             ("core", 8000),
             ("core-intake", 8443),
             ("core-page", 8082),
+            *(([("collector", 8090)]) if with_collector else []),
         ):
             identifier = compose("ps", "-q", host)
             inspected = subprocess.run(  # noqa: S603
@@ -235,3 +246,275 @@ except URLError:
         print(diagnostics.stdout, file=sys.stderr)
         cleaned = compose("down", "--volumes", "--remove-orphans", timeout=90)
         assert cleaned.returncode == 0, cleaned.stderr
+
+
+@pytest.mark.runtime
+def test_fluent_bit_persists_coalesced_records_with_stdin_open(tmp_path: Path) -> None:
+    docker = shutil.which("docker")
+    assert docker is not None
+    if os.environ.get("AI_SENTINEL_RUNTIME_REUSE_IMAGES") != "1":
+        build = subprocess.run(  # noqa: S603
+            [
+                docker,
+                "build",
+                "-f",
+                "services/collector/Dockerfile",
+                "-t",
+                "ai-sentinel-collector:local",
+                ".",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=360,
+            check=False,
+        )
+        assert build.returncode == 0, build.stderr
+    data = tmp_path / "data"
+    data.mkdir()
+    second = {**EVENT, "event_id": "459f9082-ab59-472e-8d1a-b97fc788627e"}
+    payload = json.dumps(EVENT) + "\n" + json.dumps(second) + "\n"
+    name = "ai46-stdin-" + uuid4().hex[:8]
+    probe = ROOT / "tests/integration/fixtures/fluent_bit_stdin_probe.py"
+    try:
+        result = subprocess.run(  # noqa: S603
+            [
+                docker,
+                "run",
+                "--rm",
+                "-i",
+                "--name",
+                name,
+                "--network",
+                "none",
+                "--read-only",
+                "--cap-drop",
+                "ALL",
+                "--user",
+                f"{os.getuid()}:{os.getgid()}",
+                "-v",
+                f"{data}:/data",
+                "-v",
+                f"{ROOT / 'services/collector'}:/etc/collector:ro",
+                "-v",
+                f"{probe}:/probe.py:ro",
+                "--entrypoint",
+                "python",
+                "ai-sentinel-collector:local",
+                "/probe.py",
+            ],
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "Both records persisted with stdin open" in result.stdout
+    finally:
+        subprocess.run(  # noqa: S603
+            [docker, "rm", "-f", name],
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+
+
+def _verify_collection(
+    compose: Any,
+    ssh_port: int,
+    telnet_port: int,
+    url: str,
+) -> None:
+    # Pause delivery to inspect real filesystem chunks, then recreate the
+    # collector: only its durable journal can recover the first received_at.
+    assert compose("stop", "core-intake").returncode == 0
+    ssh = shutil.which("ssh")
+    assert ssh is not None
+    result = subprocess.run(  # noqa: S603
+        [
+            ssh,
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "PreferredAuthentications=password",
+            "-o",
+            "PubkeyAuthentication=no",
+            "-o",
+            "NumberOfPasswordPrompts=1",
+            "-o",
+            "ConnectTimeout=3",
+            "-p",
+            str(ssh_port),
+            "root@127.0.0.1",
+            "exit",
+        ],
+        env={
+            **os.environ,
+            "SSH_ASKPASS": str(ROOT / "tests/integration/fixtures/ssh_askpass"),
+            "SSH_ASKPASS_REQUIRE": "force",
+            "AI_SENTINEL_TEST_PASSWORD": "honeypot-never-copied-password",
+            "DISPLAY": ":0",
+        },
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert result.returncode in (0, 255), result.stderr
+    with socket.create_connection(("127.0.0.1", telnet_port), 3) as conn:
+        conn.settimeout(3)
+
+        def receive(expected: bytes) -> None:
+            data = b""
+            while expected not in data.lower():
+                chunk = conn.recv(1024)
+                assert chunk, data
+                data += chunk
+
+        receive(b"login:")
+        conn.sendall(b"synthetic-telnet\r\n")
+        receive(b"password:")
+        conn.sendall(b"lab-only-password\r\n")
+        time.sleep(0.2)
+    damaged = compose(
+        "exec",
+        "-T",
+        "cowrie",
+        "/cowrie/cowrie-env/bin/python3",
+        "-c",
+        "from pathlib import Path; p=Path('var/log/cowrie/cowrie.json'); "
+        "p.open('a').write('{bad-json-password:lab-only-password}\\n')",
+    )
+    assert damaged.returncode == 0, damaged.stderr
+
+    def journal(expression: str) -> Any:
+        result = compose(
+            "exec",
+            "-T",
+            "collector",
+            "python",
+            "-c",
+            "import json; from pathlib import Path; "
+            "from ai_sentinel_core.telemetry import Journal; "
+            "j=Journal(Path('/data/collector.db'),'cowrie-runtime'); "
+            "print(json.dumps(" + expression + "))",
+        )
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout)
+
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        pending = journal("j.pending()")
+        if len(pending) >= 2 and journal("j.status()['quarantine']"):
+            break
+        time.sleep(1)
+    assert {e["protocol"] for e in pending} == {"ssh", "telnet"}
+    assert {e["login"]["outcome"] for e in pending} == {"failure", "success"}
+    assert journal("j.status()['quarantine']")
+    # Forbid raw passwords in every durable collector file, including chunks
+    # and SQLite journals; the only allowed copy is Cowrie's own raw log.
+    clean = compose(
+        "exec",
+        "-T",
+        "collector",
+        "python",
+        "-c",
+        "import time; from pathlib import Path; deadline=time.monotonic()+30\n"
+        "while True:\n"
+        " files=[p for p in Path('/data').rglob('*') if p.is_file()]\n"
+        " if any(p.suffix=='.flb' for p in files):\n  break\n"
+        " assert time.monotonic()<deadline, 'No filesystem chunk observed within 30s'\n"
+        " time.sleep(0.1)\n"
+        "assert all(secret not in p.read_bytes() for p in files "
+        "for secret in (b'lab-only-password',b'honeypot-never-copied-password'))",
+    )
+    assert clean.returncode == 0, clean.stderr
+    recreated = compose(
+        "up", "-d", "--no-deps", "--force-recreate", "--wait", "collector", timeout=90
+    )
+    assert recreated.returncode == 0, recreated.stderr
+    assert journal("j.pending()") == pending
+    assert compose("start", "core-intake").returncode == 0
+    deadline = time.monotonic() + 45
+    while journal("j.pending()") and time.monotonic() < deadline:
+        time.sleep(1)
+    assert journal("j.pending()") == []
+    deliveries = journal("j.status()['deliveries']")
+    assert len(deliveries) == 2
+    sources = compose(
+        "exec",
+        "-T",
+        "cowrie",
+        "/cowrie/cowrie-env/bin/python3",
+        "-c",
+        "import json; from pathlib import Path; result={}\n"
+        "for line in Path('var/log/cowrie/cowrie.json').read_text().splitlines():\n"
+        " try:\n  record=json.loads(line)\n except ValueError:\n  continue\n"
+        " if record.get('eventid')=='cowrie.session.connect':\n"
+        "  result[record['session']]={k:record[k] for k in "
+        "('src_ip','src_port','dst_port','protocol')}\n"
+        "print(json.dumps(result))",
+    )
+    assert sources.returncode == 0, sources.stderr
+    source_connections = json.loads(sources.stdout)
+    with httpx.Client(base_url=url, timeout=10, trust_env=False) as client:
+        assert (
+            client.post(
+                "/login", json={"password": "synthetic-test-password"}
+            ).status_code
+            == 200
+        )
+        for receipt in deliveries:
+            task_id = receipt["task_id"]
+            deadline = time.monotonic() + 10
+            while True:
+                task = client.get(f"/api/tasks/{task_id}").json()
+                if (
+                    task["state"] in ("completed", "failed")
+                    or time.monotonic() >= deadline
+                ):
+                    break
+                time.sleep(0.1)
+            if task["event"]["login"]["outcome"] == "failure":
+                assert task["state"] == "completed", task
+                assert task["verdict"]["severity"] == "Low"
+                assert "Low" in client.get(f"/tasks/{task_id}").text
+            else:
+                assert task["state"] == "failed", task
+                assert task["verdict"] is None
+                assert "#47" in client.get(f"/tasks/{task_id}").text
+            original = source_connections[task["event"]["session_id"]]
+            assert task["event"]["source_ip"] == original["src_ip"]
+            assert task["event"]["source_port"] == original["src_port"]
+            assert task["event"]["destination_port"] == original["dst_port"]
+            assert task["event"]["protocol"] == original["protocol"]
+            # Real event replay through Fluent Bit's output boundary.
+            replay = compose(
+                "exec",
+                "-T",
+                "collector",
+                "python",
+                "-c",
+                "from urllib.request import Request,urlopen; "
+                "r=Request('http://127.0.0.1:8090/deliver',data="
+                + repr(json.dumps([task["event"]]).encode())
+                + ",headers={'Content-Type':'application/json'}); "
+                "print(urlopen(r).status)",
+            )
+            assert replay.returncode == 0, replay.stderr
+            assert client.get(f"/api/tasks/{task_id}").json() == task
+    readonly = compose(
+        "exec",
+        "-T",
+        "collector",
+        "python",
+        "-c",
+        "from pathlib import Path\ntry:\n "
+        "Path('/cowrie-logs/forbidden').write_text('x')\n"
+        "except OSError:\n print('read_only')\nelse:\n "
+        "raise SystemExit('Writable raw logs')",
+    )
+    assert readonly.returncode == 0 and "read_only" in readonly.stdout

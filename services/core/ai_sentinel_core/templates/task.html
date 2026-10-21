@@ -2,13 +2,16 @@
 {% block content %}
 <p>{{ states[item.state] }} · {{ item.created_at | date }}</p>
 <section><h2>Событие</h2><dl>
-<dt>Тип</dt><dd>Отказ входа Cowrie</dd>
+<dt>Тип</dt><dd>{% if item.event.login.outcome == 'success' %}Успешный вход Cowrie{% else %}Отказ входа Cowrie{% endif %}</dd>
 <dt>Сенсор</dt><dd>{{ item.event.sensor_id }}</dd>
 <dt>Сессия</dt><dd>{{ item.event.session_id }}</dd>
 <dt>Источник</dt><dd>{{ item.event.source_ip }}:{{ item.event.source_port }}</dd>
 <dt>Протокол</dt><dd>{{ item.event.protocol }}</dd>
 <dt>Логин</dt><dd>{{ item.event.login.username }}</dd>
 </dl></section>
+{% if item.state == 'failed' and item.event.login.outcome == 'success' %}
+<p>Не удалось оценить: правило для успешного входа ожидает реализации #47. Вердикт не сформирован.</p>
+{% endif %}
 {% if item.verdict %}
 <section><h2>Вердикт <span class="low">{{ item.verdict.severity }}</span></h2>
 <p>{{ item.verdict.reason }}</p>

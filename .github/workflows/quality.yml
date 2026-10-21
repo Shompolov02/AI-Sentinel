@@ -163,10 +163,14 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: container-reports-${{ github.sha }}
+          # The explicit allowlist below lives in the hidden .artifacts directory.
+          include-hidden-files: true
           path: |
             .artifacts/trivy-fs.json
             .artifacts/trivy-config.json
             .artifacts/trivy-image.json
+            .artifacts/trivy-core-*.json
+            .artifacts/trivy-collector-*.json
             .artifacts/sbom.cdx.json
             .artifacts/ci-metadata.json
           if-no-files-found: error

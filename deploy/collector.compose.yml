@@ -1,0 +1,31 @@
+# Combine with the canonical Phase 1 manifest and core.compose.yml.
+services:
+  collector:
+    build:
+      context: ..
+      dockerfile: services/collector/Dockerfile
+    image: ai-sentinel-collector:local
+    user: "10001:10001"
+    group_add: ["999"]
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: "0.5"
+    mem_limit: 256m
+    pids_limit: 64
+    environment:
+      COWRIE_SENSOR_ID: ${COWRIE_SENSOR_ID:?Set COWRIE_SENSOR_ID}
+    volumes:
+      - cowrie-logs:/cowrie-logs:ro
+      - collector-data:/data
+      - ${CORE_SECRETS_DIR:?}/collector-tokens:/run/secrets/collector-tokens:ro
+      - ${CORE_SECRETS_DIR:?}/ca.crt:/run/secrets/ca.crt:ro
+    networks: [core_ingest]
+    depends_on:
+      core-intake:
+        condition: service_healthy
+
+volumes:
+  collector-data:
