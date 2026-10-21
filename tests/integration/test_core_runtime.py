@@ -248,6 +248,78 @@ except URLError:
         assert cleaned.returncode == 0, cleaned.stderr
 
 
+@pytest.mark.runtime
+def test_fluent_bit_persists_coalesced_records_with_stdin_open(tmp_path: Path) -> None:
+    docker = shutil.which("docker")
+    assert docker is not None
+    if os.environ.get("AI_SENTINEL_RUNTIME_REUSE_IMAGES") != "1":
+        build = subprocess.run(  # noqa: S603
+            [
+                docker,
+                "build",
+                "-f",
+                "services/collector/Dockerfile",
+                "-t",
+                "ai-sentinel-collector:local",
+                ".",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=360,
+            check=False,
+        )
+        assert build.returncode == 0, build.stderr
+    data = tmp_path / "data"
+    data.mkdir()
+    second = {**EVENT, "event_id": "459f9082-ab59-472e-8d1a-b97fc788627e"}
+    payload = json.dumps(EVENT) + "\n" + json.dumps(second) + "\n"
+    name = "ai46-stdin-" + uuid4().hex[:8]
+    probe = ROOT / "tests/integration/fixtures/fluent_bit_stdin_probe.py"
+    try:
+        result = subprocess.run(  # noqa: S603
+            [
+                docker,
+                "run",
+                "--rm",
+                "-i",
+                "--name",
+                name,
+                "--network",
+                "none",
+                "--read-only",
+                "--cap-drop",
+                "ALL",
+                "--user",
+                f"{os.getuid()}:{os.getgid()}",
+                "-v",
+                f"{data}:/data",
+                "-v",
+                f"{ROOT / 'services/collector'}:/etc/collector:ro",
+                "-v",
+                f"{probe}:/probe.py:ro",
+                "--entrypoint",
+                "python",
+                "ai-sentinel-collector:local",
+                "/probe.py",
+            ],
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "Both records persisted with stdin open" in result.stdout
+    finally:
+        subprocess.run(  # noqa: S603
+            [docker, "rm", "-f", name],
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+
+
 def _verify_collection(
     compose: Any,
     ssh_port: int,
@@ -344,16 +416,18 @@ def _verify_collection(
     assert journal("j.status()['quarantine']")
     # Forbid raw passwords in every durable collector file, including chunks
     # and SQLite journals; the only allowed copy is Cowrie's own raw log.
-    time.sleep(2)
     clean = compose(
         "exec",
         "-T",
         "collector",
         "python",
         "-c",
-        "from pathlib import Path; "
-        "files=[p for p in Path('/data').rglob('*') if p.is_file()]; "
-        "assert any(p.suffix=='.flb' for p in files), 'No filesystem chunk observed'; "
+        "import time; from pathlib import Path; deadline=time.monotonic()+30\n"
+        "while True:\n"
+        " files=[p for p in Path('/data').rglob('*') if p.is_file()]\n"
+        " if any(p.suffix=='.flb' for p in files):\n  break\n"
+        " assert time.monotonic()<deadline, 'No filesystem chunk observed within 30s'\n"
+        " time.sleep(0.1)\n"
         "assert all(secret not in p.read_bytes() for p in files "
         "for secret in (b'lab-only-password',b'honeypot-never-copied-password'))",
     )
