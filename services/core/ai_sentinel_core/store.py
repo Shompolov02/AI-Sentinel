@@ -5,6 +5,7 @@ import logging
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -25,6 +26,13 @@ class Store:
                     event TEXT NOT NULL, state TEXT NOT NULL,
                     created REAL NOT NULL, verdict TEXT, evidence TEXT
                 );
+                CREATE TABLE IF NOT EXISTS login_observations (
+                    task_id TEXT PRIMARY KEY, source_ip TEXT NOT NULL,
+                    occurred REAL NOT NULL, failure INTEGER NOT NULL,
+                    failure_count INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS login_window
+                    ON login_observations (source_ip, failure, occurred);
                 CREATE TABLE IF NOT EXISTS sessions (
                     digest TEXT PRIMARY KEY, last_active REAL NOT NULL
                 );
@@ -34,6 +42,31 @@ class Store:
                     task_id TEXT, details TEXT NOT NULL
                 );
             """)
+            # Upgrade the accepted-event history without revisiting old verdicts.
+            db.execute("BEGIN IMMEDIATE")
+            for row in db.execute(
+                "SELECT t.id, t.event FROM tasks t LEFT JOIN login_observations o "
+                "ON o.task_id = t.id WHERE o.task_id IS NULL ORDER BY t.rowid"
+            ).fetchall():
+                self.observe_login(db, row["id"], json.loads(row["event"]))
+
+    @staticmethod
+    def observe_login(
+        db: sqlite3.Connection, task_id: str, event: dict[str, Any]
+    ) -> None:
+        occurred = datetime.fromisoformat(
+            event["occurred_at"].replace("Z", "+00:00")
+        ).timestamp()
+        failure = event["login"]["outcome"] == "failure"
+        count = db.execute(
+            "SELECT count(*) FROM login_observations "
+            "WHERE source_ip = ? AND failure = 1 AND occurred BETWEEN ? AND ?",
+            (event["source_ip"], occurred - 300, occurred),
+        ).fetchone()[0] + int(failure)
+        db.execute(
+            "INSERT INTO login_observations VALUES (?,?,?,?,?)",
+            (task_id, event["source_ip"], occurred, int(failure), count),
+        )
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
@@ -109,6 +142,7 @@ class Store:
                 "VALUES (?,?,?,'queued',?)",
                 (task_id, event_id, event, now),
             )
+            self.observe_login(db, task_id, json.loads(event))
             self.audit(
                 db, now, "event_accepted", "collector", task_id, {"state": "queued"}
             )
@@ -129,6 +163,11 @@ class Store:
             row = db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
             if row is None or row["state"] in ("completed", "failed"):
                 return
+            observation = db.execute(
+                "SELECT failure_count FROM login_observations WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            failure_count = observation["failure_count"]
             if row["state"] == "queued":
                 db.execute(
                     "UPDATE tasks SET state = 'processing' WHERE id = ?", (task_id,)
@@ -137,9 +176,8 @@ class Store:
                     db, now, "processing", "Core", task_id, {"state": "processing"}
                 )
         event = json.loads(row["event"])
-        if event["login"]["outcome"] == "success":
-            self.fail(task_id, now, "login_success_policy_pending_47")
-            return
+        success = event["login"]["outcome"] == "success"
+        severity = "High" if success else ("Medium" if failure_count >= 5 else "Low")
         evidence_id = str(uuid4())
         evidence = [
             {
@@ -150,18 +188,26 @@ class Store:
                 if event["raw_record_ref"].startswith("synthetic:")
                 else "reference_only",
                 "facts": {
-                    "outcome": "failure",
+                    "outcome": event["login"]["outcome"],
                     "protocol": event["protocol"],
-                    "cowrie_event_type": "cowrie.login.failed",
+                    "cowrie_event_type": event["cowrie_event_type"],
+                    "failure_count": failure_count,
+                    "window_seconds": 300,
+                    "window_basis": "occurred_at",
+                    "window_end": event["occurred_at"],
                 },
             }
         ]
         verdict = {
-            "severity": "Low",
-            "reason": "Отказ входа в Cowrie; признаков успешного доступа нет. "
-            "Оценка одного события, без анализа серии попыток.",
+            "severity": severity,
+            "reason": (
+                "Успешный вход в ловушку Cowrie. Признаков вреда вне ловушки нет."
+                if success
+                else f"Отказ входа в Cowrie; отказов с этого IP за пять минут: "
+                f"{failure_count}. Порог Medium — пять отказов."
+            ),
             "analysis_method": "Rules",
-            "rules_version": "login-failure-v1",
+            "rules_version": "cowrie-login-v2",
             "guard_result": "not_applicable",
             "mitre_attack": None,
             "evidence_ids": [evidence_id],
@@ -178,7 +224,7 @@ class Store:
                 "verdict_created",
                 "Core",
                 task_id,
-                {"severity": "Low", "analysis_method": "Rules"},
+                {"severity": severity, "analysis_method": "Rules"},
             )
             self.audit(db, now, "completed", "Core", task_id, {"state": "completed"})
 

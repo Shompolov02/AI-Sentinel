@@ -1,8 +1,8 @@
 # Core intake v1 — issue #45
 
 Контракт утверждён 2026-10-20; основание — #44 и ADR 0002.
-В #46 добавлен нормализованный успешный вход; он создаёт failed-задачу без
-вердикта до реализации политики #47. Сырые записи и пароли не копируются.
+В #46 добавлен нормализованный успешный вход; #47 добавляет политику
+Low/Medium/High по ADR 0004. Сырые записи и пароли не копируются.
 
 `POST https://core-intake:8443/internal/events`, `Content-Type: application/json`,
 `Authorization: Bearer <collector token>`, с проверкой CA и имени сервера.
@@ -56,13 +56,26 @@ ID события — UUID; source_ip — IPv4/IPv6; порты — целые 1
 `task_id`, `correlation_id`, `state`, `created_at` (Unix UTC), `event`, `history`,
 `verdict`, `evidence`, `audit`. Несуществующая задача — 404.
 
-Вердикт содержит severity=Low, reason, analysis_method=Rules,
-rules_version=login-failure-v1, guard_result=not_applicable, mitre_attack=null
-(«не определена») и evidence_ids. Low относится к факту отказа входа;
-счётчики серий и успехи не реализованы до #47. Evidence содержит UUID id,
-event_id, raw_record_ref, source_kind (synthetic/reference_only) и facts с
-outcome=failure, protocol и cowrie_event_type. Core не открывает эту ссылку как
-файл или URL. Сырые записи на странице не выдаются в #45.
+Вердикт содержит severity=Low/Medium/High, reason, analysis_method=Rules,
+rules_version=cowrie-login-v2, guard_result=not_applicable, mitre_attack=null
+(«не определена») и evidence_ids. Успех получает High; отказ — Low при числе
+отказов 1–4 и Medium начиная с пятого. Critical этими правилами не формируется.
+Счёт общий для одного IP по SSH/Telnet, сессиям и сенсорам. Успех не увеличивает
+и не сбрасывает число отказов.
+
+Окно включительно: [occurred_at − 300 секунд, occurred_at]. При приёме фиксируется
+число уже принятых уникальных отказов, включая текущий. Поздняя доставка не
+пересматривает прошлые оценки; события с более поздним occurred_at в окно
+текущей записи не входят. received_at и часы Core не задают окно. Дубликаты и
+отклонённые запросы в счёт не входят. Снимок счётчика сохраняется до ответа 202
+и переживает задержку worker и перезапуск.
+
+Evidence содержит UUID id, event_id, raw_record_ref, source_kind
+(synthetic/reference_only), facts с outcome, protocol, cowrie_event_type,
+failure_count, window_seconds=300, window_basis=occurred_at и window_end.
+Причина объясняет результат и порог. Core не открывает ссылку как файл или URL.
+Сырые записи на странице пока не выдаются. Старые готовые/failed задачи,
+Evidence и аудит при обновлении не пересматриваются.
 
 Аудит задачи содержит id, at (Unix UTC), action, actor, task_id, correlation_id и
 details. Действия: event_accepted, processing, verdict_created, completed/failed.
@@ -80,8 +93,8 @@ HttpOnly/SameSite=Strict cookie. GET /tasks и /tasks/{task_id} — страни
 
 `cowrie_event_type` также допускает `cowrie.login.success`, согласованно с
 `login.outcome=success`. Несогласованные пары отклоняются с 422.
-Такая задача проходит queued → processing → failed; verdict отсутствует,
-а аудит содержит `reason=login_success_policy_pending_47`.
+Начиная с #47 новая такая задача проходит queued → processing → completed
+с High. Исторические failed-задачи #46 сохраняются без пересмотра.
 Стабильный UUIDv5 строится из сенсора, поколения файла и байтового смещения;
 received_at сохраняется при повторе. Правила источника и доставки — ADR 0003
 и [runbook сборщика](../runbooks/cowrie-collector.md).

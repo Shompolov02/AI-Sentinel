@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 from contextlib import ExitStack
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
@@ -483,9 +484,9 @@ def _verify_collection(
                 assert task["verdict"]["severity"] == "Low"
                 assert "Low" in client.get(f"/tasks/{task_id}").text
             else:
-                assert task["state"] == "failed", task
-                assert task["verdict"] is None
-                assert "#47" in client.get(f"/tasks/{task_id}").text
+                assert task["state"] == "completed", task
+                assert task["verdict"]["severity"] == "High"
+                assert "High" in client.get(f"/tasks/{task_id}").text
             original = source_connections[task["event"]["session_id"]]
             assert task["event"]["source_ip"] == original["src_ip"]
             assert task["event"]["source_port"] == original["src_port"]
@@ -506,6 +507,99 @@ def _verify_collection(
             )
             assert replay.returncode == 0, replay.stderr
             assert client.get(f"/api/tasks/{task_id}").json() == task
+    # Controlled Cowrie timestamps through the actual read-only input, Fluent
+    # Bit, verified TLS, worker and authenticated page. No wall-clock sleeps
+    # simulate the five-minute policy; sleeps below only await async delivery.
+    records = []
+    expected = {}
+    base = datetime(2026, 10, 22, 10, tzinfo=timezone.utc)
+    for number, (second, level) in enumerate(
+        (
+            (0, "Low"),
+            (60, "Low"),
+            (120, "Low"),
+            (180, "Low"),
+            (300, "Medium"),
+            (700, "Low"),
+            (701, "High"),
+        )
+    ):
+        session = f"rules-47-{number}"
+        expected[session] = level
+        stamp = (base + timedelta(seconds=second)).isoformat()
+        records.extend(
+            [
+                {
+                    "eventid": "cowrie.session.connect",
+                    "timestamp": stamp,
+                    "session": session,
+                    "src_ip": "198.51.100.47",
+                    "src_port": 41000,
+                    "dst_port": 2222 if number % 2 == 0 else 2223,
+                    "protocol": "ssh" if number % 2 == 0 else "telnet",
+                },
+                {
+                    "eventid": "cowrie.login.success"
+                    if level == "High"
+                    else "cowrie.login.failed",
+                    "timestamp": stamp,
+                    "session": session,
+                    "username": "synthetic-rules",
+                    "password": "lab-only-password",
+                },
+            ]
+        )
+    payload = "".join(json.dumps(record) + "\n" for record in records)
+    appended = compose(
+        "exec",
+        "-T",
+        "cowrie",
+        "/cowrie/cowrie-env/bin/python3",
+        "-c",
+        "from pathlib import Path; "
+        "p=Path('var/log/cowrie/cowrie.json'); p.open('a').write("
+        + repr(payload)
+        + ")",
+    )
+    assert appended.returncode == 0, appended.stderr
+    deadline = time.monotonic() + 45
+    while time.monotonic() < deadline:
+        all_deliveries = journal("j.status()['deliveries']")
+        if len(all_deliveries) == 9:
+            break
+        time.sleep(1)
+    assert len(all_deliveries) == 9
+    with httpx.Client(base_url=url, timeout=10, trust_env=False) as client:
+        assert (
+            client.post(
+                "/login", json={"password": "synthetic-test-password"}
+            ).status_code
+            == 200
+        )
+        observed = {}
+        for receipt in all_deliveries:
+            task_id = receipt["task_id"]
+            deadline = time.monotonic() + 10
+            while True:
+                task = client.get(f"/api/tasks/{task_id}").json()
+                if task["state"] == "completed" or time.monotonic() >= deadline:
+                    break
+                time.sleep(0.1)
+            session = task["event"]["session_id"]
+            if session not in expected:
+                continue
+            assert task["state"] == "completed", task
+            assert task["verdict"]["severity"] == expected[session]
+            assert expected[session] in client.get(f"/tasks/{task_id}").text
+            observed[session] = task
+        assert set(observed) == set(expected)
+        fifth = observed["rules-47-4"]
+        assert fifth["evidence"][0]["facts"]["failure_count"] == 5
+        for original_task in observed.values():
+            assert (
+                client.get(f"/api/tasks/{original_task['task_id']}").json()
+                == original_task
+            )
     readonly = compose(
         "exec",
         "-T",

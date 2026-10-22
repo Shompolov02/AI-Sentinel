@@ -10,7 +10,7 @@
 <dt>Логин</dt><dd>{{ item.event.login.username }}</dd>
 </dl></section>
 {% if item.state == 'failed' and item.event.login.outcome == 'success' %}
-<p>Не удалось оценить: правило для успешного входа ожидает реализации #47. Вердикт не сформирован.</p>
+<p>Не удалось оценить: задача завершилась до внедрения политики входов либо с ошибкой анализа. Вердикт не сформирован.</p>
 {% endif %}
 {% if item.verdict %}
 <section><h2>Вердикт <span class="low">{{ item.verdict.severity }}</span></h2>
@@ -26,7 +26,10 @@ MITRE ATT&amp;CK: не определена.</p></section>
 <p>Ссылка на источник; просмотр сырого журнала появится в следующем срезе.</p>
 {% endif %}
 <p>{{ evidence.raw_record_ref }}</p>
-<p>Основание: Cowrie сообщил об отказе входа по {{ item.event.protocol }}.</p>
+<p>Основание: Cowrie сообщил {% if evidence.facts.outcome == 'success' %}об успешном входе{% else %}об отказе входа{% endif %} по {{ evidence.facts.protocol }}.</p>
+{% if evidence.facts.failure_count is defined %}
+<p>Отказов с этого IP в окне пяти минут по времени Cowrie: {{ evidence.facts.failure_count }}.</p>
+{% endif %}
 </section>
 {% endfor %}
 <section><h2>Аудит задачи</h2><ol>
