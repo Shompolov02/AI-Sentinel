@@ -110,7 +110,9 @@ def test_damaged_and_unattributable_records_stay_in_local_quarantine(
     assert LOGIN["password"] not in caplog.text
 
 
-def test_successful_login_creates_task_without_misleading_low(tmp_path: Path) -> None:
+def test_successful_cowrie_login_has_high_verdict_on_secops_page(
+    tmp_path: Path,
+) -> None:
     logs = tmp_path / "logs"
     logs.mkdir()
     success = {**LOGIN, "eventid": "cowrie.login.success"}
@@ -128,14 +130,21 @@ def test_successful_login_creates_task_without_misleading_low(tmp_path: Path) ->
         client.post("/login", json={"password": "synthetic-test-password"})
         for _ in range(100):
             task = client.get(f"/api/tasks/{task_id}").json()
-            if task["state"] == "failed":
+            if task["state"] == "completed":
                 break
             time.sleep(0.01)
-        assert task["state"] == "failed"
-        assert task["verdict"] is None
+        assert task["state"] == "completed"
+        assert task["verdict"]["severity"] == "High"
+        assert task["verdict"]["analysis_method"] == "Rules"
+        assert task["evidence"][0]["facts"]["outcome"] == "success"
         assert (
-            task["audit"][-1]["details"]["reason"] == "login_success_policy_pending_47"
+            task["evidence"][0]["facts"]["cowrie_event_type"] == "cowrie.login.success"
         )
+        assert task["audit"][-2]["details"]["severity"] == "High"
+        page = client.get(f"/tasks/{task_id}").text
+        assert "High" in page
+        assert "Cowrie сообщил об успешном входе" in page
+        assert "Cowrie сообщил об отказе" not in page
 
 
 def test_fluent_bit_batch_is_acknowledged_only_after_core_acceptance(

@@ -2,7 +2,7 @@
 
 AI-Sentinel (САЗИИ) — greenfield-монорепозиторий для системы активной сетевой защиты и автоматического реагирования на инциденты на базе ИИ-агента.
 
-На Фазе 1 реализован лабораторный Target App с синтетическим каталогом активов и контролируемыми поверхностями SQL Injection, Command Injection и Prompt Injection. AI Agent Core принимает нормализованные отказы входа Cowrie через Fluent Bit и показывает Low на отдельной странице SecOps. Успешный вход сохраняется как задача без оценки до #47. Полная severity policy, Prompt Guard, LLM Client и SOAR ещё не реализованы.
+На Фазе 1 реализован лабораторный Target App с синтетическим каталогом активов и контролируемыми поверхностями SQL Injection, Command Injection и Prompt Injection. AI Agent Core принимает нормализованные попытки входа Cowrie через Fluent Bit и показывает Low/Medium/High на отдельной странице SecOps. Первые четыре отказа IP за пять минут по времени Cowrie получают Low, начиная с пятого — Medium; успешный вход — High. Политика команд, Prompt Guard, LLM Client и SOAR ещё не реализованы.
 
 ## Карта репозитория
 
