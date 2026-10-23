@@ -608,10 +608,15 @@ def _verify_collection(
     deadline = time.monotonic() + 45
     while time.monotonic() < deadline:
         all_deliveries = journal("j.status()['deliveries']")
-        if len(all_deliveries) == 9:
+        # Outbox admission precedes Fluent Bit/TLS delivery. Only a durable
+        # Core acknowledgement supplies a task ID safe to poll through HTTP.
+        if len(all_deliveries) == 9 and all(r["task_id"] for r in all_deliveries):
             break
         time.sleep(1)
     assert len(all_deliveries) == 9
+    assert all(r["task_id"] for r in all_deliveries), (
+        "Expected nine Core-confirmed deliveries before polling task results"
+    )
     with httpx.Client(base_url=url, timeout=10, trust_env=False) as client:
         assert (
             client.post(
@@ -624,7 +629,9 @@ def _verify_collection(
             task_id = receipt["task_id"]
             deadline = time.monotonic() + 10
             while True:
-                task = client.get(f"/api/tasks/{task_id}").json()
+                response = client.get(f"/api/tasks/{task_id}")
+                assert response.status_code == 200, response.text
+                task = response.json()
                 if task["state"] == "completed" or time.monotonic() >= deadline:
                     break
                 time.sleep(0.1)

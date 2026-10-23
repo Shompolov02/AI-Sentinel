@@ -59,6 +59,11 @@ docker compose -f deploy/docker-compose.yml -f deploy/core.compose.yml -f deploy
 docker compose -f deploy/docker-compose.yml -f deploy/core.compose.yml -f deploy/collector.compose.yml logs --tail 100 collector
 ```
 
+В `status()['deliveries']` входят все созданные записи outbox. Если `task_id=null`,
+Core ещё не подтвердил доставку; наличие строки или нужное число записей само
+по себе не доказывает доставку. Перед чтением результата задачи дождитесь
+непустого `task_id` от durable 202, не опрашивайте `/api/tasks/None`.
+
 `record_quarantined` предупреждает о повреждении или отсутствующем происхождении.
 Карантин содержит ссылку, причину, длину и digest; исходный текст остаётся только
 в сыром журнале. Ссылка заканчивается поколением файла и байтовым смещением;
