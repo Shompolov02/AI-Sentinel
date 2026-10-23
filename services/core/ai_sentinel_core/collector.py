@@ -47,7 +47,9 @@ async def run() -> None:
         while process.returncode is None:
             await asyncio.to_thread(journal.scan, Path("/cowrie-logs"))
             for event in await asyncio.to_thread(journal.pending):
-                process.stdin.write((json.dumps(event) + "\n").encode())
+                process.stdin.write(
+                    (json.dumps(event, ensure_ascii=False) + "\n").encode()
+                )
                 await process.stdin.drain()
             (state / "heartbeat").write_text(str(time.time()))
             await asyncio.sleep(2)

@@ -32,6 +32,7 @@ class Settings:
     tokens: Path
     password_hash: Path
     clock: Callable[[], float] = time.time
+    guard_model: Path | None = None
 
 
 class LoginRequest(BaseModel):
@@ -39,7 +40,7 @@ class LoginRequest(BaseModel):
 
 
 def create_app(settings: Settings) -> FastAPI:
-    store = Store(settings.database)
+    store = Store(settings.database, settings.guard_model)
     queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1000)
     scheduled: set[str] = set()
 
@@ -83,6 +84,7 @@ def create_app(settings: Settings) -> FastAPI:
             runner.cancel()
             with suppress(asyncio.CancelledError):
                 await runner
+            await asyncio.to_thread(store.guard.close)
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -150,7 +152,9 @@ def create_app(settings: Settings) -> FastAPI:
     )
     async def receive(payload: Event) -> dict[str, str]:
         result = store.accept(
-            json.dumps(payload.model_dump(mode="json"), sort_keys=True),
+            json.dumps(
+                payload.model_dump(mode="json", exclude_none=True), sort_keys=True
+            ),
             str(payload.event_id),
             settings.clock(),
         )

@@ -10,3 +10,7 @@ paths = ['''tests/security/fixtures/secret-unsafe\.txt''']
 [[allowlists]]
 description = "Generated CI reports are ignored by Git and may contain scanner fixture metadata"
 paths = ['''.artifacts/.*''']
+
+[[allowlists]]
+description = "Local third-party model and package caches; never shipped in the build context"
+paths = ['''\.local/prompt-guard/(model|cache)/.*''']

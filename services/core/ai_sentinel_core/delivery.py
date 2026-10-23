@@ -37,7 +37,7 @@ def tls_sender(tokens: Path, ca: Path) -> Sender:
         token = allowed[-1]
         request = Request(
             "https://core-intake:8443/internal/events",
-            data=json.dumps(event).encode(),
+            data=json.dumps(event, ensure_ascii=False).encode(),
             headers={
                 "Content-Type": "application/json",
                 "Authorization": "Bearer " + token,
@@ -67,7 +67,7 @@ def create_delivery_app(journal: Journal, send: Sender) -> FastAPI:
         receipts = []
         try:
             for event in events:
-                receipt = send(event.model_dump(mode="json"))
+                receipt = send(event.model_dump(mode="json", exclude_none=True))
                 journal.acknowledge(str(event.event_id), receipt["task_id"])
                 receipts.append(receipt)
         except (OSError, URLError, sqlite3.Error, ValueError, KeyError) as error:

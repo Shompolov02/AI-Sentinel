@@ -1,8 +1,10 @@
-# Core intake v1 — issue #45
+# Core intake v1 — входы и команды Cowrie (#45–#48)
 
 Контракт утверждён 2026-10-20; основание — #44 и ADR 0002.
 В #46 добавлен нормализованный успешный вход; #47 добавляет политику
-Low/Medium/High по ADR 0004. Сырые записи и пароли не копируются.
+Low/Medium/High по ADR 0004. #48 добавляет команды и локальный Guard по ADR 0005.
+Сырые записи целиком и пароли входа не копируются; текст команды включается
+в нормализованное событие и может содержать чувствительные данные.
 
 `POST https://core-intake:8443/internal/events`, `Content-Type: application/json`,
 `Authorization: Bearer <collector token>`, с проверкой CA и имени сервера.
@@ -30,7 +32,10 @@ Low/Medium/High по ADR 0004. Сырые записи и пароли не ко
 }
 ```
 
-Все поля обязательны, неизвестные поля запрещены. Время включает часовой пояс;
+Общие поля и `login` обязательны для попытки входа; для команды вместо `login`
+обязателен `command` (см. дополнение #48). Неиспользуемый payload можно опустить
+или передать как null; одновременно два непустых payload запрещены.
+Неизвестные поля запрещены, включая вложенные payload. Время включает часовой пояс;
 ID события — UUID; source_ip — IPv4/IPv6; порты — целые 1–65535; длина пароля —
 целое 0–65535. Строковые идентификаторы, логин и непрозрачная ссылка — 1–256
 символов, протокол — ssh/telnet. HTTP proxy ограничивает тело 64 KiB.
@@ -54,9 +59,11 @@ ID события — UUID; source_ip — IPv4/IPv6; порты — целые 1
 Состояния: queued → processing → completed или failed. При failed вердикта нет.
 `GET /api/tasks/{task_id}` требует пользовательский сеанс SecOps и возвращает
 `task_id`, `correlation_id`, `state`, `created_at` (Unix UTC), `event`, `history`,
-`verdict`, `evidence`, `audit`. Несуществующая задача — 404.
+`verdict`, `analysis`, `evidence`, `audit`. Несуществующая задача — 404.
+Для входа `analysis=null`; для команды это сохраняемый результат анализа,
+доступный и при `failed`. До завершения обработки он может быть null.
 
-Вердикт содержит severity=Low/Medium/High, reason, analysis_method=Rules,
+Вердикт попытки входа содержит severity=Low/Medium/High, reason, analysis_method=Rules,
 rules_version=cowrie-login-v2, guard_result=not_applicable, mitre_attack=null
 («не определена») и evidence_ids. Успех получает High; отказ — Low при числе
 отказов 1–4 и Medium начиная с пятого. Critical этими правилами не формируется.
@@ -98,3 +105,80 @@ HttpOnly/SameSite=Strict cookie. GET /tasks и /tasks/{task_id} — страни
 Стабильный UUIDv5 строится из сенсора, поколения файла и байтового смещения;
 received_at сохраняется при повторе. Правила источника и доставки — ADR 0003
 и [runbook сборщика](../runbooks/cowrie-collector.md).
+
+## Дополнение #48: команда и результат Guard
+
+Пример команды с теми же обязательными полями происхождения:
+
+```json
+{
+  "schema_version": 1,
+  "event_id": "dffcc7c9-26f0-4d2a-aab1-021d14fa64b7",
+  "occurred_at": "2026-10-23T08:00:00Z",
+  "received_at": "2026-10-23T08:00:01Z",
+  "event_type": "command",
+  "cowrie_event_type": "cowrie.command.input",
+  "sensor_id": "cowrie-lab",
+  "session_id": "synthetic-command-session",
+  "source_ip": "192.0.2.10",
+  "source_port": 41000,
+  "protocol": "telnet",
+  "destination_port": 2223,
+  "raw_record_ref": "synthetic:command-1",
+  "command": {"text": "pwd"}
+}
+```
+
+`command.text` — строго строка из 1–65536 символов. Дополнительно действуют
+байтовые лимиты 64 KiB для сырой строки и нормализованного сообщения сборщика,
+а также HTTP-тела на intake proxy: JSON-обрамление и UTF-8 тоже занимают место.
+Число символов не означает, что команда такого же размера в байтах будет принята.
+Пары `command/cowrie.command.input` и `login_attempt/cowrie.login.*` проверяются
+на согласованность; неверная пара получает 422. UUIDv5, подтверждение 202,
+повторная доставка и конфликт 409 работают как для входов. Команды не входят
+в счётчик отказов входа. Нормализатор берёт только `input` и `session.connect`
+provenance; Core не исполняет текст как shell-команду.
+
+`analysis` команды содержит `analysis_method=Fallback`,
+`rules_version=cowrie-command-v1`, `guard_result`, `reason_code`, `reason`,
+`mitre_attack=null` и `evidence_ids`. Результат Guard имеет следующие поля:
+
+| Поле | Значение |
+| --- | --- |
+| `status` | `blocked`, `no_match` или `error` |
+| `score` | Максимальная оценка класса инъекции по окнам, 0–1; null при ошибке |
+| `threshold` | 0.999; `score >= threshold` даёт `blocked` |
+| `model_id` | `viavoice/mdeberta-ru-prompt-injection` |
+| `revision` | `8e0fdb567ad0d1ddac0c9c1819b182204db26867` |
+| `policy_version` | `cowrie-command-v1` |
+| `window_count` | Число обработанных окон; 0 при отсутствии загрузки модели |
+| `reason_code` | `prompt_injection_detected`, `no_injection_detected`, `model_not_configured`, `model_unavailable` или `scan_failed` |
+
+Проверяется весь текст окнами по 256 токенов с перекрытием 64, результат —
+максимум оценок. При ошибке частичная проверка не считается `no_match`.
+Оценка не является калиброванной вероятностью безопасности.
+
+| Guard | Состояние | Вердикт | `analysis.reason_code` |
+| --- | --- | --- | --- |
+| `blocked` | `completed` | severity=High, поля `analysis` и способ Fallback | `prompt_injection_detected` |
+| `no_match` | `failed` | null, severity отсутствует | `insufficient_rules` |
+| `error` | `failed` | null, severity отсутствует | `guard_unavailable` |
+
+При `no_match` причина — «Недостаточно резервных правил для оценки команды»:
+это не ошибка доступности Guard и не подтверждение безопасности команды.
+MITRE ATT&CK во всех трёх случаях отображается как «не определена».
+LLM Client отсутствует: внешнего вызова нет ни при одном результате.
+
+Evidence сохраняет `id`, `event_id`, `raw_record_ref`, `source_kind` и безопасные
+`facts`: `cowrie_event_type`, `protocol`, структурированный `guard_result`.
+Текст команды находится в `event.command.text`, не дублируется в reason,
+вердикте, Evidence или аудите. Дополнительные audit actions — `guard_checked`
+и `fallback_warning`; завершение — `completed` либо `failed`. Локальный warning
+`command_fallback` содержит task_id и код причины, без текста команды.
+
+Завершённая задача при повторе и перезапуске сохраняет результат Guard,
+Evidence и аудит; повтор не запускает переоценку. Исторические входы не меняются.
+Карточка экранирует команду, список её не показывает. Приём и просмотр требуют
+прежних TLS/token и SecOps-разрешений. Автоматическое удаление текста и истории
+ещё не реализовано (#51); полный сырой источник пока не выдаётся (#49).
+Запуск и диагностика — [runbook Guard](../runbooks/cowrie-command-guard.md).

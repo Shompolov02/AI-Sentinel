@@ -171,6 +171,7 @@ jobs:
             .artifacts/trivy-image.json
             .artifacts/trivy-core-*.json
             .artifacts/trivy-collector-*.json
+            .artifacts/trivy-guard-image.json
             .artifacts/sbom.cdx.json
             .artifacts/ci-metadata.json
           if-no-files-found: error

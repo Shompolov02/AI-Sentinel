@@ -43,7 +43,11 @@ telnet 127.0.0.1 2223
 Успех получает High. Способ — Rules, с Evidence и ссылкой.
 Окно считается включительно по времени записи Cowrie, а не доставки.
 Повтор не увеличивает счёт, успех его не сбрасывает, прежние оценки не меняются.
-Исторические задачи без оценки, созданные до #47, сохраняются как есть. Команды и другие валидные типы Cowrie пока игнорируются.
+Исторические задачи без оценки, созданные до #47, сохраняются как есть.
+Начиная с #48 `cowrie.command.input` тоже становится отдельной задачей:
+`input` переносится в `command.text`. Для ML-проверки нужен
+[runbook Guard](cowrie-command-guard.md); без модели команда завершится
+`failed/guard_unavailable`. Другие валидные типы Cowrie игнорируются.
 LLM не вызывается. IP/порт источника, протокол и порт назначения берутся из
 session.connect; недостающие обязательные значения не угадываются. Порт
 назначения — порт Cowrie, а не переназначенный host-порт.
@@ -54,6 +58,11 @@ session.connect; недостающие обязательные значени�
 docker compose -f deploy/docker-compose.yml -f deploy/core.compose.yml -f deploy/collector.compose.yml exec -T collector python -c "import json,os; from pathlib import Path; from ai_sentinel_core.telemetry import Journal; print(json.dumps(Journal(Path('/data/collector.db'),os.environ['COWRIE_SENSOR_ID']).status(),indent=2))"
 docker compose -f deploy/docker-compose.yml -f deploy/core.compose.yml -f deploy/collector.compose.yml logs --tail 100 collector
 ```
+
+В `status()['deliveries']` входят все созданные записи outbox. Если `task_id=null`,
+Core ещё не подтвердил доставку; наличие строки или нужное число записей само
+по себе не доказывает доставку. Перед чтением результата задачи дождитесь
+непустого `task_id` от durable 202, не опрашивайте `/api/tasks/None`.
 
 `record_quarantined` предупреждает о повреждении или отсутствующем происхождении.
 Карантин содержит ссылку, причину, длину и digest; исходный текст остаётся только
@@ -91,7 +100,8 @@ Cowrie (9). Во втором сценарии SSH создаёт отказ, Te
 проверяются дисковые chunks и отсутствие синтетического пароля во всех файлах
 collector-data. Повреждённая тестовая строка изолируется. Пересоздание collector
 сохраняет pending-события; после восстановления intake отказ получает Low,
-а успех — High на странице. Дополнительно harness пишет в журнал Cowrie
+а успех — High на странице. Дополнительно harness пишет в отдельный файл
+`cowrie.json.rules-47` в том же сыром mount
 синтетическую серию с заданными временами: четыре Low, пятый на границе
 300 секунд — Medium, отказ после истечения окна — Low и успех — High.
 Все записи проходят настоящий сборщик, Fluent Bit и TLS до API и карточки.
@@ -100,6 +110,16 @@ collector-data. Повреждённая тестовая строка изол�
 mount отклоняется. Cowrie/Target App проверяются на недоступность управляющих
 сервисов по DNS и прямым IP, включая collector. Harness удаляет только собственный
 случайно названный test project и его тома.
+
+При заданном `CORE_GUARD_MODEL_DIR` Cowrie-вариант дополнительно отправляет
+настоящие Telnet-команды `pwd` и синтетическую инъекцию; проверяет Fallback,
+отсутствие severity при недостатке правил, High при обнаружении, карточки,
+повторную доставку и пересоздание Core. Обязательный запуск —
+`make test-command-runtime` (см. runbook Guard). Проверяются также запрет
+исходящих TCP-соединений Core/collector, отсутствие host-портов и Docker socket,
+non-root, read-only root, сброшенные capabilities и read-only mount модели.
+Синтетические фикстуры не дописываются в активный файл Cowrie: его открытый
+writer может перезаписать чужую вставку и исказить позиции чтения.
 
 ## Остановка и откат
 

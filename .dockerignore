@@ -1,5 +1,6 @@
 .git
 .gitignore
+.local/prompt-guard
 .codebase-memory
 .DS_Store
 

@@ -2,21 +2,31 @@
 {% block content %}
 <p>{{ states[item.state] }} · {{ item.created_at | date }}</p>
 <section><h2>Событие</h2><dl>
-<dt>Тип</dt><dd>{% if item.event.login.outcome == 'success' %}Успешный вход Cowrie{% else %}Отказ входа Cowrie{% endif %}</dd>
+<dt>Тип</dt><dd>{% if item.event.event_type == 'command' %}Команда Cowrie{% elif item.event.login.outcome == 'success' %}Успешный вход Cowrie{% else %}Отказ входа Cowrie{% endif %}</dd>
 <dt>Сенсор</dt><dd>{{ item.event.sensor_id }}</dd>
 <dt>Сессия</dt><dd>{{ item.event.session_id }}</dd>
 <dt>Источник</dt><dd>{{ item.event.source_ip }}:{{ item.event.source_port }}</dd>
 <dt>Протокол</dt><dd>{{ item.event.protocol }}</dd>
-<dt>Логин</dt><dd>{{ item.event.login.username }}</dd>
+{% if item.event.event_type == 'command' %}<dt>Команда (недоверенный текст)</dt><dd><pre>{{ item.event.command.text }}</pre></dd>{% else %}<dt>Логин</dt><dd>{{ item.event.login.username }}</dd>{% endif %}
 </dl></section>
-{% if item.state == 'failed' and item.event.login.outcome == 'success' %}
+{% if item.state == 'failed' and item.event.event_type == 'login_attempt' and item.event.login.outcome == 'success' %}
 <p>Не удалось оценить: задача завершилась до внедрения политики входов либо с ошибкой анализа. Вердикт не сформирован.</p>
+{% endif %}
+{% if item.analysis %}
+<section><h2>Анализ команды</h2>
+<p>{{ item.analysis.reason }}</p>
+<p>Способ анализа: {{ item.analysis.analysis_method }}. MITRE ATT&amp;CK: не определена.</p>
+<p>Prompt Guard: {{ item.analysis.guard_result.status }}.
+{% if item.analysis.guard_result.score is not none %}Оценка модели: {{ item.analysis.guard_result.score }}; порог {{ item.analysis.guard_result.threshold }}.{% endif %}</p>
+<p>Модель: {{ item.analysis.guard_result.model_id }}; revision {{ item.analysis.guard_result.revision }}. Политика {{ item.analysis.rules_version }}.</p>
+<p>Экспериментальный Guard: возможны ложные срабатывания и пропуски.</p>
+</section>
 {% endif %}
 {% if item.verdict %}
 <section><h2>Вердикт <span class="low">{{ item.verdict.severity }}</span></h2>
 <p>{{ item.verdict.reason }}</p>
-<p>Способ анализа: Rules — правила для входа. Prompt Guard: не применяется.
-MITRE ATT&amp;CK: не определена.</p></section>
+{% if not item.analysis %}<p>Способ анализа: Rules — правила для входа. Prompt Guard: не применяется.
+MITRE ATT&amp;CK: не определена.</p>{% endif %}</section>
 {% endif %}
 {% for evidence in item.evidence %}
 <section><h2>Evidence</h2>
@@ -26,7 +36,7 @@ MITRE ATT&amp;CK: не определена.</p></section>
 <p>Ссылка на источник; просмотр сырого журнала появится в следующем срезе.</p>
 {% endif %}
 <p>{{ evidence.raw_record_ref }}</p>
-<p>Основание: Cowrie сообщил {% if evidence.facts.outcome == 'success' %}об успешном входе{% else %}об отказе входа{% endif %} по {{ evidence.facts.protocol }}.</p>
+{% if item.event.event_type == 'command' %}<p>Основание: команда Cowrie по {{ evidence.facts.protocol }}; Prompt Guard {{ evidence.facts.guard_result.status }}.</p>{% else %}<p>Основание: Cowrie сообщил {% if evidence.facts.outcome == 'success' %}об успешном входе{% else %}об отказе входа{% endif %} по {{ evidence.facts.protocol }}.</p>{% endif %}
 {% if evidence.facts.failure_count is defined %}
 <p>Отказов с этого IP в окне пяти минут по времени Cowrie: {{ evidence.facts.failure_count }}.</p>
 {% endif %}
