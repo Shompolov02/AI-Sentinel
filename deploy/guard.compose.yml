@@ -1,0 +1,13 @@
+# Optional experimental ML Guard; combine after core.compose.yml.
+services:
+  core:
+    build:
+      target: guard
+    image: ai-sentinel-core-guard:local
+    cpus: "2"
+    mem_limit: 3g
+    pids_limit: 128
+    environment:
+      CORE_GUARD_MODEL_DIR: /opt/prompt-guard
+    volumes:
+      - ${CORE_GUARD_MODEL_DIR:?Set CORE_GUARD_MODEL_DIR to the pinned local model directory}:/opt/prompt-guard:ro

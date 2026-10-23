@@ -79,6 +79,7 @@ temp/
 .hypothesis/
 
 # Local Docker and infrastructure state
+.local/prompt-guard/
 .terraform/
 *.tfstate
 *.tfstate.*

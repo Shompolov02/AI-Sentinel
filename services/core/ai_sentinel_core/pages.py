@@ -17,6 +17,8 @@ ACTIONS = {
     "event_accepted": "Событие принято",
     "processing": "Начата обработка",
     "verdict_created": "Вердикт сохранён",
+    "guard_checked": "Prompt Guard проверен",
+    "fallback_warning": "Предупреждение: резервный анализ",
     "completed": "Обработка завершена",
     "failed": "Не удалось оценить",
 }

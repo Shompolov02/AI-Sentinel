@@ -14,11 +14,12 @@ DOCKER ?= docker
 SMOKE_IMAGE ?= ai-sentinel-smoke:security-scan
 CORE_IMAGE ?= ai-sentinel-core:security-scan
 COLLECTOR_IMAGE ?= ai-sentinel-collector:security-scan
+GUARD_IMAGE ?= ai-sentinel-core-guard:security-scan
 REPORT_DIR ?= .artifacts
 GIT_SHA ?= $(shell git rev-parse HEAD)
 LOCK_SHA256 ?= $(shell (sha256sum uv.lock 2>/dev/null || shasum -a 256 uv.lock) | awk '{print $$1}')
 
-.PHONY: bootstrap audit-metadata format format-check lint typecheck test test-runtime test-core-runtime sast sca secrets security-exceptions smoke-image core-image collector-image container-check sbom quality acceptance
+.PHONY: bootstrap audit-metadata format format-check lint typecheck test test-runtime test-core-runtime test-command-runtime sast sca secrets security-exceptions smoke-image core-image collector-image guard-image container-check sbom quality acceptance
 
 bootstrap:
 	$(UV) lock --check
@@ -49,12 +50,16 @@ test-runtime:
 test-core-runtime:
 	AI_SENTINEL_REQUIRE_DOCKER=1 $(PYTEST) -q -m runtime tests/integration/test_core_runtime.py
 
+test-command-runtime:
+	$(DOCKER) build --target guard --file services/core/Dockerfile --tag ai-sentinel-core-guard:local .
+	AI_SENTINEL_REQUIRE_DOCKER=1 AI_SENTINEL_REQUIRE_GUARD=1 $(PYTEST) -q -m runtime tests/integration/test_command_guard_runtime.py tests/integration/test_core_runtime.py
+
 sast: audit-metadata
-	$(SEMGREP) scan --config p/python --config .semgrep.yml --error --exclude tests/security/fixtures --sarif --output $(REPORT_DIR)/semgrep.sarif .
+	$(SEMGREP) scan --config p/python --config .semgrep.yml --error --exclude tests/security/fixtures --exclude .local --sarif --output $(REPORT_DIR)/semgrep.sarif .
 	@set +e; $(SEMGREP) scan --config p/python --config .semgrep.yml --error tests/security/fixtures/semgrep-unsafe.py >/dev/null 2>&1; scan_exit=$$?; set -e; test $$scan_exit -eq 1 || (echo "Semgrep unsafe fixture was not rejected (exit $$scan_exit)" >&2; exit 1)
 
 sca: audit-metadata
-	$(UV) export --locked --no-emit-project --format requirements-txt | $(UVX) --python $(SECURITY_PYTHON) --from pip-audit==2.9.0 pip-audit --strict --format json --output $(REPORT_DIR)/pip-audit.json -r /dev/stdin
+	$(UV) export --locked --no-emit-project --group guard --format requirements-txt | $(UVX) --python $(SECURITY_PYTHON) --from pip-audit==2.9.0 pip-audit --strict --format json --output $(REPORT_DIR)/pip-audit.json -r /dev/stdin
 
 secrets:
 	@command -v gitleaks >/dev/null || (echo "secrets requires gitleaks" >&2; exit 1)
@@ -74,12 +79,15 @@ core-image: audit-metadata
 collector-image: audit-metadata
 	$(DOCKER) build --file services/collector/Dockerfile --tag $(COLLECTOR_IMAGE) --label org.opencontainers.image.revision=$(GIT_SHA) --label org.ai-sentinel.lock-sha256=$(LOCK_SHA256) .
 
-container-check: smoke-image core-image collector-image
+guard-image: audit-metadata
+	$(DOCKER) build --target guard --file services/core/Dockerfile --tag $(GUARD_IMAGE) --label org.opencontainers.image.revision=$(GIT_SHA) --label org.ai-sentinel.lock-sha256=$(LOCK_SHA256) .
+
+container-check: smoke-image core-image collector-image guard-image
 	@command -v trivy >/dev/null || (echo "container-check requires trivy" >&2; exit 1)
 	@command -v docker >/dev/null || (echo "container-check requires docker" >&2; exit 1)
 	docker compose -f infrastructure/compose/smoke.yaml config --quiet
 	docker compose -f deploy/docker-compose.yml config > /dev/null
-	$(TRIVY) fs --scanners vuln --format json --output $(REPORT_DIR)/trivy-fs.json --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed .
+	$(TRIVY) fs --scanners vuln --skip-dirs .local/prompt-guard --format json --output $(REPORT_DIR)/trivy-fs.json --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed .
 	$(TRIVY) config --format json --output $(REPORT_DIR)/trivy-config.json --exit-code 1 --severity HIGH,CRITICAL infrastructure
 	@set +e; $(TRIVY) config --exit-code 42 --severity HIGH,CRITICAL tests/security/fixtures/container-policy-unsafe/Dockerfile >/dev/null 2>&1; scan_exit=$$?; set -e; test $$scan_exit -eq 42 || (echo "Trivy unsafe container-policy fixture was not rejected (exit $$scan_exit)" >&2; exit 1)
 	$(TRIVY) image --scanners vuln --format json --output $(REPORT_DIR)/trivy-image.json --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed $(SMOKE_IMAGE)
@@ -87,6 +95,7 @@ container-check: smoke-image core-image collector-image
 	$(TRIVY) image --scanners vuln --format json --output $(REPORT_DIR)/trivy-core-image.json --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed $(CORE_IMAGE)
 	$(TRIVY) config --format json --output $(REPORT_DIR)/trivy-collector-config.json --exit-code 1 --severity HIGH,CRITICAL services/collector
 	$(TRIVY) image --scanners vuln --format json --output $(REPORT_DIR)/trivy-collector-image.json --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed $(COLLECTOR_IMAGE)
+	$(TRIVY) image --scanners vuln --format json --output $(REPORT_DIR)/trivy-guard-image.json --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed $(GUARD_IMAGE)
 
 sbom: smoke-image
 	@command -v trivy >/dev/null || (echo "sbom requires trivy" >&2; exit 1)

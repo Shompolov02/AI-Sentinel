@@ -2,7 +2,7 @@
 
 AI-Sentinel (САЗИИ) — greenfield-монорепозиторий для системы активной сетевой защиты и автоматического реагирования на инциденты на базе ИИ-агента.
 
-На Фазе 1 реализован лабораторный Target App с синтетическим каталогом активов и контролируемыми поверхностями SQL Injection, Command Injection и Prompt Injection. AI Agent Core принимает нормализованные попытки входа Cowrie через Fluent Bit и показывает Low/Medium/High на отдельной странице SecOps. Первые четыре отказа IP за пять минут по времени Cowrie получают Low, начиная с пятого — Medium; успешный вход — High. Политика команд, Prompt Guard, LLM Client и SOAR ещё не реализованы.
+На Фазе 1 реализован лабораторный Target App с синтетическим каталогом активов и контролируемыми поверхностями SQL Injection, Command Injection и Prompt Injection. AI Agent Core принимает попытки входа и команды Cowrie через Fluent Bit и показывает результаты на отдельной странице SecOps. Первые четыре отказа IP за пять минут по времени Cowrie получают Low, начиная с пятого — Medium; успешный вход — High. Команды проверяет экспериментальный локальный ML Prompt Guard: обнаруженная инъекция получает High/Fallback; при отсутствии обнаружения и недостатке резервных правил задача получает «не удалось оценить», без выдуманной severity. LLM Client и SOAR ещё не реализованы; внешних вызовов анализа нет.
 
 ## Карта репозитория
 
@@ -85,16 +85,17 @@ make lint            # lint Ruff
 make typecheck       # строгий mypy
 make test            # pytest и coverage
 make test-runtime    # HTTP edge и изоляция в Docker Compose
+make test-command-runtime # обязательная ML-приёмка; заранее задайте CORE_GUARD_MODEL_DIR
 make acceptance      # quality gate и обязательная runtime-приёмка
 make sast            # Semgrep, fail-closed
 make sca             # pip-audit, fail-closed
 make secrets         # Gitleaks, fail-closed
 make security-exceptions # проверка срока и полноты Security Exceptions
 make container-check # Trivy, fail-closed
-make quality         # read-only полный quality gate
+make quality         # полный quality gate без форматирования исходников
 ```
 
-`quality` использует `ruff format --check`, поэтому не изменяет файлы. Security-команды намеренно завершаются с ошибкой, если соответствующий scanner не установлен.
+`quality` использует `ruff format --check`, поэтому не форматирует исходники; создаёт отчёты в `.artifacts/` и собирает образы smoke, Core, collector и Guard. Security-команды намеренно завершаются с ошибкой, если соответствующий scanner не установлен. SCA включает группу зависимостей `guard`, Trivy проверяет Guard-образ. Файловые сканеры исключают локальную модель и сторонний кэш; веса и кэш также исключены из Git и Docker build context.
 
 Правила репозитория, роли, Definition of Done и процесс pull request описаны в
 [`docs/governance.md`](docs/governance.md). Сообщения об угрозах направляются
@@ -121,3 +122,26 @@ Phase 1 Compose. Он требует предварительного созда
 Реальный путь SSH/Telnet → нормализация → Fluent Bit → Core включается третьим
 `deploy/collector.compose.yml`. [Runbook сборщика](docs/runbooks/cowrie-collector.md)
 описывает запуск, локальный карантин, ротацию и проверку отсутствия пароля в буфере.
+
+## Команды Cowrie и локальный Prompt Guard (#48)
+
+Для ML-проверки добавьте `deploy/guard.compose.yml` после Core и collector overlays.
+[Runbook Guard](docs/runbooks/cowrie-command-guard.md) описывает загрузку пяти
+закреплённых ONNX/tokenizer-файлов, проверку SHA-256, запуск и откат.
+Модель `viavoice/mdeberta-ru-prompt-injection` работает на CPU в дочернем процессе
+контейнера Core; веса подключаются read-only из `.local/prompt-guard/model/`.
+На macOS ML-пакеты не устанавливаются. Docker хранит образы и named volumes
+в своём хранилище, отдельно от папки проекта.
+
+При пороге 0.999 проба на 39 уникальных синтетических примерах дала 17/18
+обнаружений инъекции и 3/21 ложных срабатывания. Это исследовательская модель
+с известными пропусками, а не гарантия безопасности. `no_match` не является
+вердиктом о безопасности shell-команды. Без модели команда также завершается
+«не удалось оценить», с отдельной причиной недоступности Guard; входы сохраняют
+свою политику Rules. Подробнее: [ADR 0005](docs/adr/0005-cowrie-command-guard.md)
+и [отчёт приёмки #48](docs/acceptance/cowrie-command-guard-issue-48.md).
+
+Текст команды виден только в авторизованной карточке как экранированный текст,
+но сохраняется в Cowrie, outbox/chunks сборщика и событии Core. Автоматическое
+удаление через 14/30 дней пока не реализовано (#51); просмотр сырой записи —
+отдельный срез #49. На этом этапе используйте синтетические команды.

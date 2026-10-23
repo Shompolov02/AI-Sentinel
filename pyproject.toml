@@ -17,6 +17,11 @@ default-groups = ["dev"]
 members = ["packages/smoke"]
 
 [dependency-groups]
+guard = [
+    "numpy==2.2.6",
+    "onnxruntime==1.23.2",
+    "tokenizers==0.22.1",
+]
 dev = [
     "mypy>=1.11,<2",
     "pytest>=9.0.3,<10",
@@ -28,7 +33,7 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--strict-markers --strict-config -m 'not runtime'"
-markers = ["runtime: local Docker Compose acceptance checks"]
+markers = ["runtime: local Docker Compose acceptance checks", "guard: real local ML weights required"]
 
 [tool.ruff]
 target-version = "py310"

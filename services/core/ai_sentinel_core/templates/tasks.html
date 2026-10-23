@@ -8,7 +8,7 @@
 {% for row in rows %}
 <tr><td>{{ row.created | date }}</td>
 <td class="task-id"><a href="/tasks/{{ row.id }}">{{ row.id }}</a></td>
-<td>Отказ входа Cowrie</td><td>{{ states[row.state] }}</td>
+<td>{% if row.event_type == 'command' %}Команда Cowrie{% elif row.outcome == 'success' %}Успешный вход Cowrie{% else %}Отказ входа Cowrie{% endif %}</td><td>{{ states[row.state] }}</td>
 <td>{{ row.severity }}</td></tr>
 {% else %}<tr><td colspan="5">Принятых задач пока нет.</td></tr>{% endfor %}
 </table>

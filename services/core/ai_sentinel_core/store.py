@@ -12,12 +12,15 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 
+from .guard import POLICY_VERSION, Guard
+
 logger = logging.getLogger("ai_sentinel_core")
 
 
 class Store:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, guard_model: Path | None = None) -> None:
         self.path = path
+        self.guard = Guard(guard_model)
         path.parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as db:
             db.executescript("""
@@ -25,6 +28,9 @@ class Store:
                     id TEXT PRIMARY KEY, event_id TEXT UNIQUE NOT NULL,
                     event TEXT NOT NULL, state TEXT NOT NULL,
                     created REAL NOT NULL, verdict TEXT, evidence TEXT
+                );
+                CREATE TABLE IF NOT EXISTS task_analysis (
+                    task_id TEXT PRIMARY KEY, payload TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS login_observations (
                     task_id TEXT PRIMARY KEY, source_ip TEXT NOT NULL,
@@ -54,6 +60,8 @@ class Store:
     def observe_login(
         db: sqlite3.Connection, task_id: str, event: dict[str, Any]
     ) -> None:
+        if event["event_type"] != "login_attempt":
+            return
         occurred = datetime.fromisoformat(
             event["occurred_at"].replace("Z", "+00:00")
         ).timestamp()
@@ -163,11 +171,12 @@ class Store:
             row = db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
             if row is None or row["state"] in ("completed", "failed"):
                 return
+            event = json.loads(row["event"])
             observation = db.execute(
                 "SELECT failure_count FROM login_observations WHERE task_id = ?",
                 (task_id,),
             ).fetchone()
-            failure_count = observation["failure_count"]
+            failure_count = observation["failure_count"] if observation else 0
             if row["state"] == "queued":
                 db.execute(
                     "UPDATE tasks SET state = 'processing' WHERE id = ?", (task_id,)
@@ -175,7 +184,9 @@ class Store:
                 self.audit(
                     db, now, "processing", "Core", task_id, {"state": "processing"}
                 )
-        event = json.loads(row["event"])
+        if event["event_type"] == "command":
+            self.process_command(task_id, event, now)
+            return
         success = event["login"]["outcome"] == "success"
         severity = "High" if success else ("Medium" if failure_count >= 5 else "Low")
         evidence_id = str(uuid4())
@@ -228,6 +239,100 @@ class Store:
             )
             self.audit(db, now, "completed", "Core", task_id, {"state": "completed"})
 
+    def process_command(self, task_id: str, event: dict[str, Any], now: float) -> None:
+        evidence_id = str(uuid4())
+        guard = self.guard.inspect(event["command"]["text"])
+        blocked = guard["status"] == "blocked"
+        if blocked:
+            reason_code = "prompt_injection_detected"
+            reason = (
+                "Экспериментальный Prompt Guard обнаружил признаки Prompt Injection. "
+                "Текст изолирован от LLM."
+            )
+        elif guard["status"] == "no_match":
+            reason_code = "insufficient_rules"
+            reason = (
+                "Недостаточно резервных правил для оценки команды. "
+                "Prompt Guard не обнаружил признаков Prompt Injection; "
+                "LLM не подключена, оценка невозможна."
+            )
+        else:
+            reason_code = "guard_unavailable"
+            reason = (
+                "Prompt Guard недоступен. Внешний вызов запрещён; оценка невозможна."
+            )
+        analysis: dict[str, Any] = {
+            "analysis_method": "Fallback",
+            "rules_version": POLICY_VERSION,
+            "guard_result": guard,
+            "reason_code": reason_code,
+            "reason": reason,
+            "mitre_attack": None,
+            "evidence_ids": [evidence_id],
+        }
+        evidence = [
+            {
+                "id": evidence_id,
+                "event_id": event["event_id"],
+                "raw_record_ref": event["raw_record_ref"],
+                "source_kind": "synthetic"
+                if event["raw_record_ref"].startswith("synthetic:")
+                else "reference_only",
+                "facts": {
+                    "cowrie_event_type": event["cowrie_event_type"],
+                    "protocol": event["protocol"],
+                    "guard_result": analysis["guard_result"],
+                },
+            }
+        ]
+        state = "completed" if blocked else "failed"
+        verdict = {**analysis, "severity": "High"} if blocked else None
+        with self.connection() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO task_analysis VALUES (?,?)",
+                (task_id, json.dumps(analysis)),
+            )
+            db.execute(
+                "UPDATE tasks SET state = ?, evidence = ?, verdict = ? WHERE id = ?",
+                (
+                    state,
+                    json.dumps(evidence),
+                    json.dumps(verdict) if verdict else None,
+                    task_id,
+                ),
+            )
+            self.audit(
+                db, now, "guard_checked", "Core", task_id, analysis["guard_result"]
+            )
+            self.audit(
+                db,
+                now,
+                "fallback_warning",
+                "Core",
+                task_id,
+                {"reason_code": analysis["reason_code"]},
+            )
+            if verdict:
+                self.audit(
+                    db,
+                    now,
+                    "verdict_created",
+                    "Core",
+                    task_id,
+                    {"severity": "High", "analysis_method": "Fallback"},
+                )
+            self.audit(
+                db,
+                now,
+                state,
+                "Core",
+                task_id,
+                {"state": state, "reason": analysis["reason_code"]},
+            )
+        logger.warning(
+            "command_fallback task_id=%s reason=%s", task_id, analysis["reason_code"]
+        )
+
     def fail(self, task_id: str, now: float, reason: str = "analysis_error") -> None:
         with self.connection() as db:
             db.execute(
@@ -249,6 +354,9 @@ class Store:
             row = db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
             if row is None:
                 raise HTTPException(404, "Task not found")
+            analysis = db.execute(
+                "SELECT payload FROM task_analysis WHERE task_id = ?", (task_id,)
+            ).fetchone()
             audit = [
                 dict(entry)
                 for entry in db.execute(
@@ -265,6 +373,7 @@ class Store:
             "event": json.loads(row["event"]),
             "created_at": row["created"],
             "verdict": json.loads(row["verdict"]) if row["verdict"] else None,
+            "analysis": json.loads(analysis["payload"]) if analysis else None,
             "evidence": json.loads(row["evidence"]) if row["evidence"] else [],
             "history": [
                 entry["details"]["state"]
@@ -279,7 +388,9 @@ class Store:
             return [
                 dict(row)
                 for row in db.execute(
-                    "SELECT id, state, created, verdict FROM tasks "
+                    "SELECT id, state, created, verdict, "
+                    "json_extract(event, '$.event_type') AS event_type, "
+                    "json_extract(event, '$.login.outcome') AS outcome FROM tasks "
                     "ORDER BY created DESC, rowid DESC LIMIT 100"
                 )
             ]

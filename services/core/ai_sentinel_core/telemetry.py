@@ -147,7 +147,11 @@ class Journal:
                     (connect.session, connect.model_dump_json()),
                 )
                 return
-            if kind not in ("cowrie.login.failed", "cowrie.login.success"):
+            if kind not in (
+                "cowrie.login.failed",
+                "cowrie.login.success",
+                "cowrie.command.input",
+            ):
                 return
             if not isinstance(record.get("session"), str):
                 raise ValueError("Invalid session")
@@ -155,8 +159,22 @@ class Journal:
                 "SELECT payload FROM connections WHERE session = ?",
                 (record.get("session"),),
             ).fetchone()
-            if connect_row is None or not isinstance(record.get("password"), str):
-                raise ValueError("Missing login provenance")
+            if connect_row is None:
+                raise ValueError("Missing event provenance")
+            if kind == "cowrie.command.input":
+                details: dict[str, Any] = {"command": {"text": record["input"]}}
+            else:
+                if not isinstance(record.get("password"), str):
+                    raise ValueError("Missing login provenance")
+                details = {
+                    "login": {
+                        "username": record["username"],
+                        "outcome": "success"
+                        if kind == "cowrie.login.success"
+                        else "failure",
+                        "password_length": len(record["password"]),
+                    }
+                }
             connect = Connection.model_validate_json(connect_row[0])
             reference = f"cowrie:{self.sensor}:{generation}:{offset}"
             event = Event.model_validate(
@@ -165,7 +183,9 @@ class Journal:
                     "event_id": str(uuid5(NAMESPACE_URL, reference)),
                     "occurred_at": record["timestamp"],
                     "received_at": datetime.now(timezone.utc).isoformat(),
-                    "event_type": "login_attempt",
+                    "event_type": "command"
+                    if kind == "cowrie.command.input"
+                    else "login_attempt",
                     "cowrie_event_type": kind,
                     "sensor_id": self.sensor,
                     "session_id": connect.session,
@@ -174,18 +194,15 @@ class Journal:
                     "protocol": connect.protocol,
                     "destination_port": connect.dst_port,
                     "raw_record_ref": reference,
-                    "login": {
-                        "username": record["username"],
-                        "outcome": "success"
-                        if kind == "cowrie.login.success"
-                        else "failure",
-                        "password_length": len(record["password"]),
-                    },
+                    **details,
                 }
             )
+            payload = event.model_dump_json(exclude_none=True)
+            if len(payload.encode()) > MAX_LINE:
+                raise ValueError("Normalized record exceeds intake limit")
             db.execute(
                 "INSERT OR IGNORE INTO outbox VALUES (?,?,NULL)",
-                (str(event.event_id), event.model_dump_json()),
+                (str(event.event_id), payload),
             )
         except (ValueError, KeyError, TypeError, ValidationError, RecursionError):
             self.quarantine(db, generation, offset, raw, "invalid_record")
