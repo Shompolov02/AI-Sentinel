@@ -1,0 +1,55 @@
+# Optional #49 source reader; apply after core and collector overlays.
+services:
+  core:
+    environment:
+      CORE_RAW_READER_TOKENS_FILE: /run/secrets/raw-reader-tokens
+      CORE_RAW_READER_CA_FILE: /run/secrets/raw-reader-ca.crt
+    volumes:
+      - ${CORE_SECRETS_DIR:?}/raw-reader-tokens:/run/secrets/raw-reader-tokens:ro
+      - ${CORE_SECRETS_DIR:?}/ca.crt:/run/secrets/raw-reader-ca.crt:ro
+    depends_on:
+      raw-reader:
+        condition: service_healthy
+
+  raw-reader:
+    build:
+      context: ..
+      dockerfile: services/core/Dockerfile
+      target: runtime
+    image: ai-sentinel-core:local
+    user: "10001:10001"
+    group_add: ["999"]
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: "0.25"
+    mem_limit: 128m
+    pids_limit: 64
+    command:
+      - uvicorn
+      - ai_sentinel_core.raw_source:application
+      - --factory
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8443"
+      - --ssl-keyfile
+      - /run/secrets/raw-reader.key
+      - --ssl-certfile
+      - /run/secrets/raw-reader.crt
+      - --no-access-log
+    volumes:
+      - cowrie-logs:/cowrie-logs:ro
+      - collector-data:/registry:ro
+      - ${CORE_SECRETS_DIR:?}/raw-reader-tokens:/run/secrets/raw-reader-tokens:ro
+      - ${CORE_SECRETS_DIR:?}/raw-reader.key:/run/secrets/raw-reader.key:ro
+      - ${CORE_SECRETS_DIR:?}/raw-reader.crt:/run/secrets/raw-reader.crt:ro
+      - ${CORE_SECRETS_DIR:?}/ca.crt:/run/secrets/ca.crt:ro
+    networks: [core_management]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import ssl; from urllib.request import urlopen; urlopen('https://raw-reader:8443/health',context=ssl.create_default_context(cafile='/run/secrets/ca.crt'),timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5

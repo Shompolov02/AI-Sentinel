@@ -41,6 +41,19 @@ def test_core_tls_to_page_persists_on_volume_and_keeps_cowrie_isolated(
         check=False,
     )
     assert tls.returncode == 0, tls.stderr
+    if with_collector:
+        reader_tls = subprocess.run(  # noqa: S603
+            [
+                shutil.which("sh") or "/bin/sh",
+                "scripts/raw_reader_credentials.sh",
+                str(secret_dir),
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert reader_tls.returncode == 0, reader_tls.stderr
     (secret_dir / "password-hash").write_text(TEST_VERIFIER)
     (secret_dir / "collector-tokens").write_text(
         "synthetic-collector-token-for-tests\n"
@@ -79,12 +92,19 @@ def test_core_tls_to_page_persists_on_volume_and_keeps_cowrie_isolated(
     guard_enabled = with_collector and bool(os.environ.get("CORE_GUARD_MODEL_DIR"))
     if with_collector:
         command.extend(["-f", "deploy/collector.compose.yml"])
+        command.extend(["-f", "deploy/evidence.compose.yml"])
     if guard_enabled:
         command.extend(["-f", "deploy/guard.compose.yml"])
 
-    def compose(*args: str, timeout: int = 60) -> subprocess.CompletedProcess[str]:
+    def compose(
+        *args: str, timeout: int = 60, without_reader: bool = False
+    ) -> subprocess.CompletedProcess[str]:
+        selected_command = command.copy()
+        if without_reader:
+            overlay = selected_command.index("deploy/evidence.compose.yml")
+            del selected_command[overlay - 1 : overlay + 1]
         return subprocess.run(  # noqa: S603
-            [*command, *args],
+            [*selected_command, *args],
             cwd=ROOT,
             env=environment,
             capture_output=True,
@@ -146,6 +166,10 @@ except URLError:
         config = compose("config", "--format", "json")
         assert config.returncode == 0, config.stderr
         model = json.loads(config.stdout)
+        if with_collector:
+            assert "raw-reader" in model["services"], (
+                "Cowrie acceptance must include Evidence reader"
+            )
         assert set(model["services"]["cowrie"]["networks"]) == {"honeynet"}
         for service in ("core", "core-intake"):
             assert not model["services"][service].get("ports")
@@ -162,7 +186,7 @@ except URLError:
         status = compose("ps", "--format", "json")
         assert status.returncode == 0, status.stderr
         services = [json.loads(line) for line in status.stdout.splitlines() if line]
-        assert len(services) == (9 if with_collector else 8), (
+        assert len(services) == (10 if with_collector else 8), (
             "Core runbook must start the full combined stand"
         )
         assert all(service["Health"] == "healthy" for service in services)
@@ -205,7 +229,11 @@ except URLError:
             _verify_collection(compose, ssh_port, telnet_port, url)
             if guard_enabled:
                 _verify_commands(compose, telnet_port, url)
-        for source in ("core", *(["collector"] if with_collector else [])):
+            _verify_evidence(compose, telnet_port, url)
+        for source in (
+            "core",
+            *(["collector", "raw-reader"] if with_collector else []),
+        ):
             probe = compose(
                 "exec",
                 "-T",
@@ -229,6 +257,7 @@ except URLError:
             ("core-intake", 8443),
             ("core-page", 8082),
             *(([("collector", 8090)]) if with_collector else []),
+            *(([("raw-reader", 8443)]) if with_collector else []),
         ):
             identifier = compose("ps", "-q", host)
             inspected = subprocess.run(  # noqa: S603
@@ -240,7 +269,7 @@ except URLError:
             )
             assert inspected.returncode == 0, inspected.stderr
             details = json.loads(inspected.stdout)[0]
-            if host in ("core", "collector"):
+            if host in ("core", "collector", "raw-reader"):
                 security = details["HostConfig"]
                 assert details["Config"]["User"] == "10001:10001"
                 assert security["ReadonlyRootfs"] and not security["Privileged"]
@@ -251,6 +280,15 @@ except URLError:
                     mount["Destination"] != "/var/run/docker.sock"
                     for mount in details["Mounts"]
                 )
+                if host == "raw-reader":
+                    assert set(details["NetworkSettings"]["Networks"]) == {
+                        project + "_core_management"
+                    }
+                    assert all(
+                        not mount["RW"]
+                        for mount in details["Mounts"]
+                        if mount["Destination"] in ("/cowrie-logs", "/registry")
+                    )
                 if host == "core" and guard_enabled:
                     assert any(
                         mount["Destination"] == "/opt/prompt-guard" and not mount["RW"]
@@ -662,6 +700,235 @@ def _verify_collection(
         "raise SystemExit('Writable raw logs')",
     )
     assert readonly.returncode == 0 and "read_only" in readonly.stdout
+
+
+def _verify_evidence(compose: Any, telnet_port: int, url: str) -> None:
+    command = 'echo "<script>alert(49)</script>"'
+    with socket.create_connection(("127.0.0.1", telnet_port), 10) as connection:
+        connection.settimeout(10)
+
+        def receive(expected: bytes | None = None) -> None:
+            data = b""
+            while True:
+                chunk = connection.recv(4096)
+                assert chunk, data
+                data += chunk
+                if expected is not None and expected in data.lower():
+                    return
+                if expected is None and data.endswith((b"$ ", b"# ")):
+                    return
+                assert len(data) < 65536
+
+        receive(b"login:")
+        connection.sendall(b"evidence-49\r\n")
+        receive(b"password:")
+        connection.sendall(b"lab-only-password\r\n")
+        receive()
+        connection.sendall(command.encode() + b"\r\n")
+        receive()
+
+    with httpx.Client(base_url=url, timeout=10, trust_env=False) as client:
+        assert client.post(
+            "/login", json={"password": "synthetic-test-password"}
+        ).json() == {"role": "SecOps"}
+        deadline = time.monotonic() + 120
+        selected = None
+        login_source = None
+        while time.monotonic() < deadline:
+            status = compose(
+                "exec",
+                "-T",
+                "collector",
+                "python",
+                "-c",
+                "import json; from pathlib import Path; "
+                "from ai_sentinel_core.telemetry import Journal; "
+                "journal=Journal(Path('/data/collector.db'),'cowrie-runtime'); "
+                "print(json.dumps(journal.status()['deliveries']))",
+            )
+            assert status.returncode == 0, status.stderr
+            for receipt in json.loads(status.stdout):
+                if not receipt["task_id"]:
+                    continue
+                response = client.get(f"/api/tasks/{receipt['task_id']}")
+                assert response.status_code == 200, response.text
+                item = response.json()
+                if item["state"] not in ("completed", "failed"):
+                    continue
+                event = item["event"]
+                if (
+                    event["event_type"] == "command"
+                    and event["command"]["text"] == command
+                ):
+                    selected = item
+                if (
+                    event["event_type"] == "login_attempt"
+                    and event["login"]["username"] == "evidence-49"
+                ):
+                    login_source = item
+            if selected and login_source:
+                break
+            time.sleep(1)
+        assert selected and login_source, "Real Cowrie Evidence tasks were not observed"
+        assert selected["evidence"][0]["source_status"] == "available", selected[
+            "evidence"
+        ]
+        raw_url = selected["evidence"][0]["raw_url"]
+        raw = client.get(raw_url)
+        assert raw.status_code == 200, raw.text
+        assert raw.headers["content-type"].startswith("text/plain")
+        assert raw.headers["cache-control"] == "no-store"
+        assert len(raw.text.splitlines()) == 1
+        assert raw.json()["input"] == command
+        page_url = f"/tasks/{selected['task_id']}"
+        page = client.get(page_url)
+        assert (
+            "&lt;script&gt;" in page.text
+            and "<script>alert(49)</script>" not in page.text
+        )
+        assert "Показать исходную запись" in page.text
+        assert client.get("/task.js").status_code == 200
+        assert "alert(49)" not in client.get("/tasks").text
+        login_raw = client.get(login_source["evidence"][0]["raw_url"])
+        assert login_raw.status_code == 200, login_raw.text
+        assert login_raw.json()["password"] == "lab-only-password"  # noqa: S105
+        assert "lab-only-password" not in json.dumps(login_source)
+        assert (
+            "lab-only-password"
+            not in client.get(f"/tasks/{login_source['task_id']}").text
+        )
+
+        # TLS must check both trust and the reader's DNS identity.
+        tls = compose(
+            "exec",
+            "-T",
+            "raw-reader",
+            "python",
+            "-c",
+            "import ssl; from urllib.request import urlopen\n"
+            "from urllib.error import URLError\n"
+            "private=ssl.create_default_context(cafile='/run/secrets/ca.crt')\n"
+            "for address,context in ["
+            "('https://raw-reader:8443/health',ssl.create_default_context()),"
+            "('https://127.0.0.1:8443/health',private)]:\n"
+            " try:\n  urlopen(address,context=context,timeout=3)\n"
+            " except URLError:\n  continue\n"
+            " raise SystemExit('TLS trust/name was not enforced')\n"
+            "print('reader_tls_verified')",
+        )
+        assert tls.returncode == 0 and "reader_tls_verified" in tls.stdout, tls.stderr
+        authority = compose(
+            "exec",
+            "-T",
+            "core",
+            "python",
+            "-c",
+            "import ssl; from pathlib import Path\n"
+            "from urllib.request import Request,urlopen\n"
+            "from urllib.error import HTTPError\n"
+            "context=ssl.create_default_context(cafile='/run/secrets/raw-reader-ca.crt')\n"
+            "collector=Path('/run/secrets/collector-tokens').read_text().strip()\n"
+            "for token in ['',collector]:\n"
+            " request=Request('https://raw-reader:8443/internal/record',"
+            "data=b'{}',headers={'Content-Type':'application/json',"
+            "'Authorization':'Bearer '+token})\n"
+            " try:\n  urlopen(request,context=context,timeout=3)\n"
+            " except HTTPError as error:\n  assert error.code==401; continue\n"
+            " raise SystemExit('Reader accepted wrong authority')\n"
+            "print('reader_authority_verified')",
+        )
+        assert (
+            authority.returncode == 0
+            and "reader_authority_verified" in authority.stdout
+        ), authority.stderr
+        readonly = compose(
+            "exec",
+            "-T",
+            "raw-reader",
+            "python",
+            "-c",
+            "from pathlib import Path\nfor directory in ['/registry','/cowrie-logs']:\n"
+            " try:\n  (Path(directory)/'forbidden-test-write').write_text('x')\n"
+            " except OSError:\n  continue\n"
+            " raise SystemExit('Writable reader source mount')\n"
+            "print('reader_read_only')",
+        )
+        assert readonly.returncode == 0 and "reader_read_only" in readonly.stdout, (
+            readonly.stderr
+        )
+        assert compose("stop", "raw-reader").returncode == 0
+        unavailable = client.get(f"/api/tasks/{selected['task_id']}")
+        assert unavailable.status_code == 200
+        assert unavailable.json()["evidence"][0]["source_status"] == "unavailable"
+        assert "Источник удалён" not in client.get(page_url).text
+        assert client.get(raw_url).status_code == 503
+        restored = compose("up", "-d", "--no-deps", "--wait", "raw-reader", timeout=90)
+        assert restored.returncode == 0, restored.stderr
+        assert client.get(raw_url).text == raw.text
+        rotated = compose(
+            "exec",
+            "-T",
+            "cowrie",
+            "/cowrie/cowrie-env/bin/python3",
+            "-c",
+            "from pathlib import Path; p=Path('var/log/cowrie/cowrie.json'); "
+            "p.rename(p.with_name('cowrie.json.evidence49'))",
+        )
+        assert rotated.returncode == 0, rotated.stderr
+        assert client.get(raw_url).text == raw.text
+        removed = compose(
+            "exec",
+            "-T",
+            "cowrie",
+            "/cowrie/cowrie-env/bin/python3",
+            "-c",
+            "from pathlib import Path; "
+            "Path('var/log/cowrie/cowrie.json.evidence49').unlink()",
+        )
+        assert removed.returncode == 0, removed.stderr
+        assert client.get(raw_url).status_code == 410
+        deleted = client.get(f"/api/tasks/{selected['task_id']}").json()
+        assert deleted["evidence"][0]["source_status"] == "deleted"
+        assert "raw_url" not in deleted["evidence"][0]
+        assert "excerpt" not in deleted["evidence"][0]
+        assert deleted["event"]["command"]["text"] is None
+        assert deleted["analysis"] == selected["analysis"]
+        assert deleted["audit"] == selected["audit"]
+        assert "Источник удалён" in client.get(page_url).text
+        assert "alert(49)" not in client.get(page_url).text
+        recreated = compose(
+            "up", "-d", "--no-deps", "--force-recreate", "--wait", "core", timeout=90
+        )
+        assert recreated.returncode == 0, recreated.stderr
+        assert client.get(f"/api/tasks/{selected['task_id']}").json() == deleted
+        assert compose("stop", "raw-reader").returncode == 0
+        assert client.get(f"/api/tasks/{selected['task_id']}").json() == deleted
+        assert client.get(raw_url).status_code == 410
+        # Runbook stop preserves volumes, including confirmed source deletion.
+        assert compose("down", timeout=90).returncode == 0
+        started = compose("up", "-d", "--no-build", "--wait", timeout=180)
+        assert started.returncode == 0, started.stderr
+        assert client.get(f"/api/tasks/{selected['task_id']}").json() == deleted
+        # Disable the optional reader overlay, then restore it without data loss.
+        rollback = compose(
+            "up",
+            "-d",
+            "--no-build",
+            "--force-recreate",
+            "--remove-orphans",
+            "--wait",
+            without_reader=True,
+            timeout=180,
+        )
+        assert rollback.returncode == 0, rollback.stderr
+        assert client.get(f"/api/tasks/{selected['task_id']}").json() == deleted
+        restored = compose("up", "-d", "--no-build", "--wait", timeout=180)
+        assert restored.returncode == 0, restored.stderr
+        assert client.get(f"/api/tasks/{selected['task_id']}").json() == deleted
+        client.cookies.clear()
+        denied = client.get(raw_url)
+        assert denied.status_code == 401
+        assert denied.headers["cache-control"] == "no-store"
 
 
 def _verify_commands(compose: Any, telnet_port: int, url: str) -> None:

@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 from .app import Settings, create_app
+from .raw_source import tls_reader
 
 
 def application() -> object:
@@ -13,6 +14,12 @@ def application() -> object:
         Path(os.environ["CORE_PASSWORD_HASH_FILE"]),
         guard_model=Path(os.environ["CORE_GUARD_MODEL_DIR"])
         if os.environ.get("CORE_GUARD_MODEL_DIR")
+        else None,
+        source_reader=tls_reader(
+            Path(os.environ["CORE_RAW_READER_TOKENS_FILE"]),
+            Path(os.environ["CORE_RAW_READER_CA_FILE"]),
+        )
+        if os.environ.get("CORE_RAW_READER_TOKENS_FILE")
         else None,
     )
     if not settings.password_hash.read_text().strip().startswith("scrypt$"):

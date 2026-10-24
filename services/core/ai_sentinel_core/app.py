@@ -11,16 +11,23 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+)
 from pydantic import BaseModel, Field
 from starlette.responses import Response
 
 from . import pages
 from .auth import session_digest, verify_password
 from .contracts import Event
+from .raw_source import SourceReader
 from .store import Store
 
 logger = logging.getLogger("ai_sentinel_core")
@@ -33,6 +40,9 @@ class Settings:
     password_hash: Path
     clock: Callable[[], float] = time.time
     guard_model: Path | None = None
+    source_reader: SourceReader | None = None
+    # Trusted single-operator configuration; production always uses SecOps.
+    operator_role: str = "SecOps"
 
 
 class LoginRequest(BaseModel):
@@ -137,15 +147,21 @@ def create_app(settings: Settings) -> FastAPI:
         ):
             raise HTTPException(401, "Collector authorization required")
 
-    def require_secops(request: Request) -> None:
+    def require_reader(request: Request) -> str:
         token = request.cookies.get("core_session", "")
         touch = request.query_params.get("poll") != "1"
-        if not token or not store.authenticate(
-            session_digest(token), settings.clock(), touch
-        ):
+        role = (
+            store.authenticate(session_digest(token), settings.clock(), touch)
+            if token
+            else None
+        )
+        if role is None:
             raise HTTPException(401, "SecOps login required")
+        if role not in ("SecOps", "DevOps", "Auditor"):
+            raise HTTPException(403, "Evidence reading is not permitted for this role")
         if touch:
             request.state.active_session = token
+        return role
 
     @app.post(
         "/internal/events", status_code=202, dependencies=[Depends(require_collector)]
@@ -171,30 +187,102 @@ def create_app(settings: Settings) -> FastAPI:
         if not verify_password(payload.password, settings.password_hash.read_text()):
             raise HTTPException(401, "Invalid credentials")
         token = secrets.token_urlsafe(32)
-        store.login(session_digest(token), settings.clock())
-        response = JSONResponse({"role": "SecOps"})
+        store.login(session_digest(token), settings.clock(), settings.operator_role)
+        response = JSONResponse({"role": settings.operator_role})
         response.set_cookie(
             "core_session", token, httponly=True, samesite="strict", max_age=1800
         )
         return response
 
     @app.get(
-        "/tasks", response_class=HTMLResponse, dependencies=[Depends(require_secops)]
+        "/tasks",
+        response_class=HTMLResponse,
     )
-    def tasks() -> str:
-        return pages.task_list(store.recent(), store.logins())
+    def tasks(role: str = Depends(require_reader)) -> str:
+        return pages.task_list(store.recent(), store.logins(), role)
 
-    @app.get("/api/tasks/{task_id}", dependencies=[Depends(require_secops)])
+    def task_evidence(task_id: str) -> dict[str, Any]:
+        item = store.task(task_id)
+        event = item["event"]
+        for evidence in item["evidence"]:
+            if evidence["source_kind"] == "synthetic":
+                evidence["source_status"] = "synthetic"
+                continue
+            status = (
+                "deleted" if store.source_deleted(event["event_id"]) else "unavailable"
+            )
+            if status != "deleted" and settings.source_reader is not None:
+                try:
+                    settings.source_reader(event)
+                    status = "available"
+                except HTTPError as error:
+                    error.close()
+                    if error.code == 410:
+                        status = "deleted"
+                        store.confirm_source_deleted(
+                            event["event_id"], settings.clock()
+                        )
+                except (OSError, ValueError):
+                    pass
+            evidence["source_status"] = status
+            if status == "deleted" and event["event_type"] == "command":
+                # Presentation only: physical deletion of all copies belongs to #51.
+                event["command"]["text"] = None
+            if status != "available":
+                continue
+            text = (
+                event["command"]["text"]
+                if event["event_type"] == "command"
+                else f"{event['cowrie_event_type']} · {event['protocol']} · "
+                f"{event['login']['username']}"
+            )
+            evidence["excerpt"] = text[:512]
+            evidence["excerpt_truncated"] = len(text) > 512
+            evidence["raw_url"] = f"/api/tasks/{task_id}/evidence/{evidence['id']}/raw"
+        return item
+
+    @app.get("/api/tasks/{task_id}", dependencies=[Depends(require_reader)])
     def task(task_id: str) -> dict[str, Any]:
-        return store.task(task_id)
+        return task_evidence(task_id)
+
+    @app.get(
+        "/api/tasks/{task_id}/evidence/{evidence_id}/raw",
+        dependencies=[Depends(require_reader)],
+    )
+    def raw_record(task_id: str, evidence_id: str) -> PlainTextResponse:
+        item = store.task(task_id)
+        evidence = next(
+            (entry for entry in item["evidence"] if entry["id"] == evidence_id), None
+        )
+        if evidence is None or evidence["source_kind"] == "synthetic":
+            raise HTTPException(404, "Source record unavailable")
+        if store.source_deleted(item["event"]["event_id"]):
+            raise HTTPException(410, "Источник удалён")
+        if settings.source_reader is None:
+            raise HTTPException(503, "Source reader unavailable")
+        try:
+            return PlainTextResponse(settings.source_reader(item["event"]))
+        except HTTPError as error:
+            error.close()
+            if error.code == 410:
+                store.confirm_source_deleted(
+                    item["event"]["event_id"], settings.clock()
+                )
+                raise HTTPException(410, "Источник удалён") from None
+            raise HTTPException(503, "Source reader unavailable") from None
+        except (OSError, ValueError):
+            raise HTTPException(503, "Source reader unavailable") from None
 
     @app.get(
         "/tasks/{task_id}",
         response_class=HTMLResponse,
-        dependencies=[Depends(require_secops)],
     )
-    def task_page(task_id: str) -> str:
-        return pages.task_page(store.task(task_id))
+    def task_page(task_id: str, role: str = Depends(require_reader)) -> str:
+        return pages.task_page(task_evidence(task_id), role)
+
+    @app.get("/task.js")
+    def task_script() -> Response:
+        return Response(pages.TASK_SCRIPT, media_type="text/javascript")
 
     @app.get("/", include_in_schema=False)
     def root() -> RedirectResponse:

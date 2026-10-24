@@ -13,7 +13,7 @@
 {% else %}<tr><td colspan="5">Принятых задач пока нет.</td></tr>{% endfor %}
 </table>
 </section>
-<section><h2>Последние успешные входы SecOps</h2><ul>
+<section><h2>Последние успешные входы</h2><ul>
 {% for at in logins %}<li>{{ at | date }}</li>{% endfor %}
 </ul></section>
 {% endblock %}
