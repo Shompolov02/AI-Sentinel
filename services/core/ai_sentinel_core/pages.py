@@ -55,21 +55,59 @@ document.getElementById("login").addEventListener("submit", async (event) => {
 });"""
 
 
-def task_list(rows: list[dict[str, Any]], logins: list[float]) -> str:
+def task_list(
+    rows: list[dict[str, Any]], logins: list[float], role: str = "SecOps"
+) -> str:
     for row in rows:
         row["severity"] = (
             json.loads(row["verdict"])["severity"] if row["verdict"] else "—"
         )
     return ENV.get_template("tasks.html").render(
-        title="Список задач", rows=rows, logins=logins, states=STATES, refresh=True
+        title="Список задач",
+        rows=rows,
+        logins=logins,
+        states=STATES,
+        refresh=True,
+        role=role,
     )
 
 
-def task_page(item: dict[str, Any]) -> str:
+def task_page(item: dict[str, Any], role: str = "SecOps") -> str:
     return ENV.get_template("task.html").render(
         title="Задача " + item["task_id"],
         item=item,
         states=STATES,
         actions=ACTIONS,
+        role=role,
         refresh=item["state"] in ("queued", "processing"),
     )
+
+
+TASK_SCRIPT = """
+document.querySelectorAll('[data-raw-url]').forEach(link => {
+  link.addEventListener('click', async event => {
+    event.preventDefault();
+    const output = document.getElementById(link.dataset.output);
+    output.hidden = false;
+    output.textContent = 'Загрузка исходной записи…';
+    try {
+      const response = await fetch(link.dataset.rawUrl, {cache: 'no-store'});
+      if (response.status === 410) {
+        const section = link.closest('[data-evidence]');
+        const fragment = section.querySelector('[data-source-fragment]');
+        if (fragment) fragment.remove();
+        link.remove();
+        const command = document.querySelector('[data-command-text]');
+        if (command) command.textContent = 'Текст команды недоступен: источник удалён.';
+        output.textContent = 'Источник удалён.';
+        return;
+      }
+      output.textContent = response.ok
+        ? await response.text()
+        : 'Исходная запись недоступна. Повторите позже или проверьте сеанс.';
+    } catch {
+      output.textContent = 'Сервис чтения недоступен. Повторите позже.';
+    }
+  });
+});
+"""

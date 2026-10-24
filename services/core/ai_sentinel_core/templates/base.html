@@ -16,10 +16,11 @@ section { background:white; border:1px solid #dce2ed; border-radius:12px;
 dt { font-weight:600; margin-top:.8rem; } dd { margin:.2rem 0; }
 nav { margin-bottom:2rem; } .low { color:#246141; font-weight:700; }
 .task-id { overflow-wrap:anywhere; }
+.evidence-text { white-space:pre-wrap; overflow-wrap:anywhere; }
 </style>
 </head>
 <body>
-<nav><a href="/tasks">Список задач</a> · SecOps · Только чтение</nav>
+<nav><a href="/tasks">Список задач</a> · {{ role | default('SecOps') }} · Только чтение</nav>
 <h1 class="task-id">{{ title }}</h1>
 {% block content %}{% endblock %}
 </body>

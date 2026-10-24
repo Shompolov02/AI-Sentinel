@@ -23,6 +23,13 @@ class Store:
         self.guard = Guard(guard_model)
         path.parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as db:
+            legacy_sessions = (
+                db.execute(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type = 'table' AND name = 'session_roles'"
+                ).fetchone()
+                is None
+            )
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS tasks (
                     id TEXT PRIMARY KEY, event_id TEXT UNIQUE NOT NULL,
@@ -42,6 +49,12 @@ class Store:
                 CREATE TABLE IF NOT EXISTS sessions (
                     digest TEXT PRIMARY KEY, last_active REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS session_roles (
+                    digest TEXT PRIMARY KEY, role TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS source_deletions (
+                    event_id TEXT PRIMARY KEY, confirmed_at REAL NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS audit (
                     id INTEGER PRIMARY KEY, at REAL NOT NULL,
                     action TEXT NOT NULL, actor TEXT NOT NULL,
@@ -50,6 +63,11 @@ class Store:
             """)
             # Upgrade the accepted-event history without revisiting old verdicts.
             db.execute("BEGIN IMMEDIATE")
+            if legacy_sessions:
+                # Before #49 every human session belonged to the sole SecOps.
+                db.execute(
+                    "INSERT INTO session_roles SELECT digest, 'SecOps' FROM sessions"
+                )
             for row in db.execute(
                 "SELECT t.id, t.event FROM tasks t LEFT JOIN login_observations o "
                 "ON o.task_id = t.id WHERE o.task_id IS NULL ORDER BY t.rowid"
@@ -86,28 +104,32 @@ class Store:
         finally:
             db.close()
 
-    def login(self, digest: str, now: float) -> None:
+    def login(self, digest: str, now: float, role: str = "SecOps") -> None:
         with self.connection() as db:
             db.execute("INSERT INTO sessions VALUES (?, ?)", (digest, now))
-            self.audit(db, now, "login_succeeded", "SecOps", None, {})
+            db.execute("INSERT INTO session_roles VALUES (?, ?)", (digest, role))
+            self.audit(db, now, "login_succeeded", role, None, {})
 
-    def authenticate(self, digest: str, now: float, touch: bool = True) -> bool:
+    def authenticate(self, digest: str, now: float, touch: bool = True) -> str | None:
         with self.connection() as db:
             db.execute("DELETE FROM sessions WHERE last_active <= ?", (now - 1800,))
-            if not touch:
-                return (
-                    db.execute(
-                        "SELECT 1 FROM sessions WHERE digest = ?", (digest,)
-                    ).fetchone()
-                    is not None
-                )
-            return (
+            db.execute(
+                "DELETE FROM session_roles "
+                "WHERE digest NOT IN (SELECT digest FROM sessions)"
+            )
+            row = db.execute(
+                "SELECT role FROM sessions JOIN session_roles USING (digest) "
+                "WHERE digest = ?",
+                (digest,),
+            ).fetchone()
+            if row is None:
+                return None
+            if touch:
                 db.execute(
                     "UPDATE sessions SET last_active = ? WHERE digest = ?",
                     (now, digest),
-                ).rowcount
-                == 1
-            )
+                )
+            return str(row["role"])
 
     @staticmethod
     def audit(
@@ -123,6 +145,21 @@ class Store:
             "VALUES (?,?,?,?,?)",
             (now, action, actor, task_id, json.dumps(details)),
         )
+
+    def source_deleted(self, event_id: str) -> bool:
+        with self.connection() as db:
+            return (
+                db.execute(
+                    "SELECT 1 FROM source_deletions WHERE event_id = ?", (event_id,)
+                ).fetchone()
+                is not None
+            )
+
+    def confirm_source_deleted(self, event_id: str, now: float) -> None:
+        with self.connection() as db:
+            db.execute(
+                "INSERT OR IGNORE INTO source_deletions VALUES (?, ?)", (event_id, now)
+            )
 
     def accept(self, event: str, event_id: str, now: float) -> dict[str, str]:
         with self.connection() as db:

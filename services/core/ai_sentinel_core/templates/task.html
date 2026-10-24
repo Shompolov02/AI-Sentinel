@@ -7,7 +7,7 @@
 <dt>Сессия</dt><dd>{{ item.event.session_id }}</dd>
 <dt>Источник</dt><dd>{{ item.event.source_ip }}:{{ item.event.source_port }}</dd>
 <dt>Протокол</dt><dd>{{ item.event.protocol }}</dd>
-{% if item.event.event_type == 'command' %}<dt>Команда (недоверенный текст)</dt><dd><pre>{{ item.event.command.text }}</pre></dd>{% else %}<dt>Логин</dt><dd>{{ item.event.login.username }}</dd>{% endif %}
+{% if item.event.event_type == 'command' %}<dt>Команда (недоверенный текст)</dt><dd><pre data-command-text>{% if item.event.command.text is none %}Текст команды недоступен: источник удалён.{% else %}{{ item.event.command.text }}{% endif %}</pre></dd>{% else %}<dt>Логин</dt><dd>{{ item.event.login.username }}</dd>{% endif %}
 </dl></section>
 {% if item.state == 'failed' and item.event.event_type == 'login_attempt' and item.event.login.outcome == 'success' %}
 <p>Не удалось оценить: задача завершилась до внедрения политики входов либо с ошибкой анализа. Вердикт не сформирован.</p>
@@ -29,11 +29,20 @@
 MITRE ATT&amp;CK: не определена.</p>{% endif %}</section>
 {% endif %}
 {% for evidence in item.evidence %}
-<section><h2>Evidence</h2>
+<section data-evidence><h2>Evidence</h2>
 {% if evidence.source_kind == 'synthetic' %}
 <p>Синтетический источник: исходный журнал отсутствует.</p>
+{% elif evidence.source_status == 'deleted' %}
+<p>Источник удалён.</p>
+{% elif evidence.raw_url is defined %}
+<div data-source-fragment>
+<p>Фрагмент Evidence:</p><pre class="evidence-text">{{ evidence.excerpt }}</pre>
+{% if evidence.excerpt_truncated %}<p>Фрагмент сокращён до 512 символов.</p>{% endif %}
+</div>
+<p><a href="#raw-{{ evidence.id }}" data-raw-url="{{ evidence.raw_url }}" data-output="raw-{{ evidence.id }}">Показать исходную запись</a></p>
+<pre class="evidence-text" id="raw-{{ evidence.id }}" hidden></pre>
 {% else %}
-<p>Ссылка на источник; просмотр сырого журнала появится в следующем срезе.</p>
+<p>Источник временно недоступен или не может быть проверен. Повторите позже.</p>
 {% endif %}
 <p>{{ evidence.raw_record_ref }}</p>
 {% if item.event.event_type == 'command' %}<p>Основание: команда Cowrie по {{ evidence.facts.protocol }}; Prompt Guard {{ evidence.facts.guard_result.status }}.</p>{% else %}<p>Основание: Cowrie сообщил {% if evidence.facts.outcome == 'success' %}об успешном входе{% else %}об отказе входа{% endif %} по {{ evidence.facts.protocol }}.</p>{% endif %}
@@ -47,4 +56,5 @@ MITRE ATT&amp;CK: не определена.</p>{% endif %}</section>
 <li>{{ entry.at | date }} — {{ actions[entry.action] }}</li>
 {% endfor %}
 </ol></section>
+<script src="/task.js" defer></script>
 {% endblock %}
