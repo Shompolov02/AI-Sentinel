@@ -19,7 +19,7 @@ members = ["packages/smoke"]
 [dependency-groups]
 guard = [
     "numpy==2.2.6",
-    "onnxruntime==1.23.2",
+    "onnxruntime==1.24.3",
     "tokenizers==0.22.1",
 ]
 dev = [
