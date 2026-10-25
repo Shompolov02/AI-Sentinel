@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import logging
+import os
 import secrets
 import sqlite3
 import time
@@ -10,7 +12,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.error import HTTPError
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -25,6 +27,7 @@ from pydantic import BaseModel, Field
 from starlette.responses import Response
 
 from . import pages
+from .alerts import CriticalAlerts
 from .auth import session_digest, verify_password
 from .contracts import Event
 from .raw_source import SourceReader
@@ -51,8 +54,23 @@ class LoginRequest(BaseModel):
 
 def create_app(settings: Settings) -> FastAPI:
     store = Store(settings.database, settings.guard_model)
+    critical = CriticalAlerts(store)
     queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1000)
     scheduled: set[str] = set()
+
+    def disk_exhausted() -> bool:
+        space = os.statvfs(settings.database.parent)
+        return (space.f_blocks > 0 and space.f_bavail == 0) or (
+            space.f_files > 0 and space.f_favail == 0
+        )
+
+    def report_disk_error(error: Exception) -> None:
+        confirmed = isinstance(error, OSError) and error.errno == errno.ENOSPC
+        if isinstance(error, sqlite3.Error):
+            with suppress(OSError):
+                confirmed = disk_exhausted()
+        if confirmed and critical.raise_alert("disk_full", settings.clock()):
+            logger.critical("disk_full")
 
     def schedule(task_id: str) -> None:
         if task_id not in scheduled:
@@ -73,12 +91,15 @@ def create_app(settings: Settings) -> FastAPI:
                     # remaining queued tasks stay durable for next startup.
                     await work
                     raise
-            except Exception:
-                logger.error("analysis_error task_id=%s", task_id)
+            except Exception as error:
+                logger.warning("analysis_error task_id=%s", task_id)
+                report_disk_error(error)
                 try:
                     store.fail(task_id, settings.clock())
-                except Exception:
+                except Exception as failure:
                     logger.critical("storage_failure task_id=%s", task_id)
+                    critical.raise_alert("storage_failure", settings.clock(), task_id)
+                    report_disk_error(failure)
             finally:
                 scheduled.discard(task_id)
                 queue.task_done()
@@ -95,6 +116,8 @@ def create_app(settings: Settings) -> FastAPI:
             with suppress(asyncio.CancelledError):
                 await runner
             await asyncio.to_thread(store.guard.close)
+            with suppress(sqlite3.Error, OSError):
+                critical.flush()
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -104,10 +127,18 @@ def create_app(settings: Settings) -> FastAPI:
     ) -> Response:
         try:
             response: Response = await call_next(request)
-        except (sqlite3.Error, OSError):
+            if response.status_code < 300:
+                critical.flush()
+        except (sqlite3.Error, OSError) as error:
             logger.critical("storage_unavailable")
-            response = JSONResponse(
-                {"detail": "Storage unavailable; retry later"}, status_code=503
+            critical.raise_alert("storage_unavailable", settings.clock())
+            report_disk_error(error)
+            response = (
+                HTMLResponse(pages.UNAVAILABLE_PAGE, status_code=503)
+                if request.url.path.startswith("/tasks") or request.url.path == "/login"
+                else JSONResponse(
+                    {"detail": "Storage unavailable; retry later"}, status_code=503
+                )
             )
         if response.status_code == 401 and request.url.path.startswith("/tasks"):
             response = HTMLResponse(
@@ -167,13 +198,19 @@ def create_app(settings: Settings) -> FastAPI:
         "/internal/events", status_code=202, dependencies=[Depends(require_collector)]
     )
     async def receive(payload: Event) -> dict[str, str]:
-        result = store.accept(
-            json.dumps(
-                payload.model_dump(mode="json", exclude_none=True), sort_keys=True
-            ),
-            str(payload.event_id),
-            settings.clock(),
-        )
+        try:
+            result = store.accept(
+                json.dumps(
+                    payload.model_dump(mode="json", exclude_none=True), sort_keys=True
+                ),
+                str(payload.event_id),
+                settings.clock(),
+            )
+        except HTTPException as error:
+            if error.status_code == 503:
+                critical.raise_alert("intake_capacity_reached", settings.clock())
+                critical.flush()
+            raise
         if result["state"] in ("queued", "processing"):
             schedule(result["task_id"])
         return result
@@ -198,8 +235,39 @@ def create_app(settings: Settings) -> FastAPI:
         "/tasks",
         response_class=HTMLResponse,
     )
-    def tasks(role: str = Depends(require_reader)) -> str:
-        return pages.task_list(store.recent(), store.logins(), role)
+    def tasks(
+        q: str = "",
+        state: Literal["", "queued", "processing", "completed", "failed"] = "",
+        role: str = Depends(require_reader),
+    ) -> str:
+        q = q.strip()
+        if store.intake_full():
+            critical.raise_alert("intake_capacity_reached", settings.clock())
+        else:
+            critical.resolve("intake_capacity_reached", settings.clock())
+        critical.resolve("storage_unavailable", settings.clock())
+        for episode in critical.active():
+            if episode["code"] == "storage_failure" and store.task(episode["task_id"])[
+                "state"
+            ] in ("completed", "failed"):
+                critical.resolve(
+                    "storage_failure", settings.clock(), episode["task_id"]
+                )
+        if disk_exhausted():
+            if critical.raise_alert("disk_full", settings.clock()):
+                logger.critical("disk_full")
+        else:
+            critical.resolve("disk_full", settings.clock())
+        critical.flush()
+        return pages.task_list(
+            store.recent(q=q, state=state),
+            store.logins(),
+            role,
+            q=q,
+            state=state,
+            alerts=store.alert_history(),
+            active_alerts=critical.active(),
+        )
 
     def task_evidence(task_id: str) -> dict[str, Any]:
         item = store.task(task_id)

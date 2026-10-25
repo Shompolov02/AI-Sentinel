@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -770,6 +771,34 @@ def _verify_evidence(compose: Any, telnet_port: int, url: str) -> None:
                 break
             time.sleep(1)
         assert selected and login_source, "Real Cowrie Evidence tasks were not observed"
+        # #50: the same real Cowrie command is searchable on the operator page.
+        task_id = selected["task_id"]
+        listing = client.get(
+            "/tasks", params={"q": task_id[8:24].upper(), "state": selected["state"]}
+        )
+        assert listing.status_code == 200
+        rows = re.search(
+            r'<table aria-label="Задачи">(.*?)</table>', listing.text, re.S
+        )
+        assert rows and f'href="/tasks/{task_id}"' in rows.group(1)
+        assert login_source["task_id"] not in rows.group(1)
+        assert "История сигналов Core" in listing.text
+        assert "Предупреждение" in listing.text
+        assert "Резервный анализ:" in listing.text
+        assert "<script>alert(49)</script>" not in listing.text
+        wrong_state = "failed" if selected["state"] == "completed" else "completed"
+        excluded = client.get("/tasks", params={"q": task_id, "state": wrong_state})
+        rows = re.search(
+            r'<table aria-label="Задачи">(.*?)</table>', excluded.text, re.S
+        )
+        assert rows and f'href="/tasks/{task_id}"' not in rows.group(1)
+        # Task filtering must not hide operational warnings in the history.
+        history = re.search(
+            r'<table aria-label="История сигналов Core">(.*?)</table>',
+            excluded.text,
+            re.S,
+        )
+        assert history and f'href="/tasks/{task_id}"' in history.group(1)
         assert selected["evidence"][0]["source_status"] == "available", selected[
             "evidence"
         ]

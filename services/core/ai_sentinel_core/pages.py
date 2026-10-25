@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
@@ -22,6 +23,23 @@ ACTIONS = {
     "completed": "Обработка завершена",
     "failed": "Не удалось оценить",
 }
+ALERT_REASONS = {
+    "prompt_injection_detected": "Резервный анализ: обнаружена Prompt Injection",
+    "insufficient_rules": "Резервный анализ: недостаточно правил",
+    "guard_unavailable": "Резервный анализ: Guard недоступен",
+    "analysis_error": "Ошибка анализа задачи",
+    "storage_unavailable": "Хранилище Core недоступно",
+    "intake_capacity_reached": "Приём остановлен: очередь заполнена",
+    "disk_full": "Диск заполнен",
+    "storage_failure": "Не удалось сохранить состояние задачи",
+}
+UNAVAILABLE_PAGE = (
+    '<!doctype html><html lang="ru"><meta charset="utf-8">'
+    '<meta name="viewport" content="width=device-width,initial-scale=1">'
+    "<title>Core недоступен</title><h1>Core недоступен</h1>"
+    "<p>Критическая проблема: проверьте журналы и контейнеры.</p>"
+    "<p>Состояние задач сейчас проверить нельзя.</p></html>"
+)
 ENV = Environment(
     loader=FileSystemLoader(Path(__file__).parent / "templates"),
     autoescape=select_autoescape(["html"]),
@@ -56,7 +74,13 @@ document.getElementById("login").addEventListener("submit", async (event) => {
 
 
 def task_list(
-    rows: list[dict[str, Any]], logins: list[float], role: str = "SecOps"
+    rows: list[dict[str, Any]],
+    logins: list[float],
+    role: str = "SecOps",
+    q: str = "",
+    state: str = "",
+    alerts: list[dict[str, Any]] | None = None,
+    active_alerts: list[dict[str, Any]] | None = None,
 ) -> str:
     for row in rows:
         row["severity"] = (
@@ -69,6 +93,12 @@ def task_list(
         states=STATES,
         refresh=True,
         role=role,
+        state=state,
+        q=q,
+        refresh_url="?" + urlencode({"q": q, "state": state, "poll": "1"}),
+        alerts=alerts or [],
+        active_alerts=active_alerts or [],
+        alert_reasons=ALERT_REASONS,
     )
 
 
