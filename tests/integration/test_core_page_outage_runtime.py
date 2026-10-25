@@ -1,5 +1,6 @@
 """The page ingress supplies a safe emergency page without a running Core."""
 
+import os
 import shutil
 import subprocess
 import sys
@@ -23,10 +24,30 @@ def test_page_ingress_shows_503_when_core_process_is_unavailable(
     assert docker is not None, "Docker is required"
     name = "ai50-page-outage-" + uuid4().hex[:8]
 
-    def run(*args: str) -> subprocess.CompletedProcess[str]:
+    def run(*args: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
         return subprocess.run(  # noqa: S603
-            [docker, *args], capture_output=True, text=True, timeout=30, check=False
+            [docker, *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
         )
+
+    if os.environ.get("AI_SENTINEL_RUNTIME_REUSE_IMAGES") != "1":
+        for dockerfile, image in (
+            ("deploy/nginx/Dockerfile", "ai-sentinel-nginx:local"),
+            ("services/core/Dockerfile", "ai-sentinel-core:local"),
+        ):
+            built = run(
+                "build",
+                "--file",
+                str(ROOT / dockerfile),
+                "--tag",
+                image,
+                str(ROOT),
+                timeout=360,
+            )
+            assert built.returncode == 0, built.stdout + built.stderr
 
     try:
         network = run("network", "create", name)
