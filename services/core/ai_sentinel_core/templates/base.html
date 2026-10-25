@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-{% if refresh %}<meta http-equiv="refresh" content="10;url=?poll=1">{% endif %}
+{% if refresh %}<meta http-equiv="refresh" content="10;url={{ refresh_url | default('?poll=1') }}">{% endif %}
 <title>{{ title }}</title>
 <style>
 body { max-width:1100px; margin:2rem auto; padding:1rem; font:17px system-ui;

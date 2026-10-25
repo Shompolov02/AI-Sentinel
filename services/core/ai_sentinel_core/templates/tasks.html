@@ -1,8 +1,28 @@
 {% extends "base.html" %}
 {% block content %}
+<section><h2>Текущие критические проблемы Core</h2>
+{% for alert in active_alerts %}
+<p><strong>Критический · Активно</strong> · {{ alert.at | date }} · {{ alert_reasons[alert.code] }}
+{% if alert.task_id %} · <a href="/tasks/{{ alert.task_id }}">{{ alert.task_id }}</a>{% endif %}</p>
+{% else %}<p>Нет текущих критических проблем.</p>{% endfor %}
+<p><a href="#core-alert-history">История предупреждений и тревог</a></p>
+</section>
 <section>
-<p>Последние 100 задач. Обновление каждые 10 секунд.</p>
-<table>
+<form method="get" action="/tasks">
+<label for="q">Номер задачи или его часть</label>
+<input type="search" id="q" name="q" value="{{ q }}">
+<label for="state">Состояние</label>
+<select id="state" name="state">
+<option value=""{% if not state %} selected{% endif %}>Все состояния</option>
+{% for value, label in states.items() %}
+<option value="{{ value }}"{% if state == value %} selected{% endif %}>{{ label }}</option>
+{% endfor %}
+</select>
+<button type="submit">Найти</button>
+<a href="/tasks">Сбросить</a>
+</form>
+<p>До 100 последних{% if q or state %} подходящих{% endif %} задач. Поиск по всей сохранённой истории. Обновление каждые 10 секунд.</p>
+<table aria-label="Задачи">
 <tr><th>Принято</th><th>Номер задачи</th><th>Событие</th>
 <th>Состояние</th><th>Уровень</th></tr>
 {% for row in rows %}
@@ -10,7 +30,19 @@
 <td class="task-id"><a href="/tasks/{{ row.id }}">{{ row.id }}</a></td>
 <td>{% if row.event_type == 'command' %}Команда Cowrie{% elif row.outcome == 'success' %}Успешный вход Cowrie{% else %}Отказ входа Cowrie{% endif %}</td><td>{{ states[row.state] }}</td>
 <td>{{ row.severity }}</td></tr>
-{% else %}<tr><td colspan="5">Принятых задач пока нет.</td></tr>{% endfor %}
+{% else %}<tr><td colspan="5">{% if q or state %}Задачи не найдены.{% else %}Принятых задач пока нет.{% endif %}</td></tr>{% endfor %}
+</table>
+</section>
+<section id="core-alert-history"><h2>История сигналов Core</h2>
+<p>Последние 100 сигналов. Уровень сигнала описывает работу Core, а не угрозу события.</p>
+<table aria-label="История сигналов Core">
+<tr><th>Время</th><th>Уровень</th><th>Причина</th><th>Задача</th><th>Состояние сигнала</th></tr>
+{% for alert in alerts %}
+<tr><td>{{ alert.at | date }}</td><td>{% if alert.level == 'critical' %}Критический{% else %}Предупреждение{% endif %}</td>
+<td>{{ alert_reasons[alert.code] }}</td>
+<td class="task-id">{% if alert.task_id %}<a href="/tasks/{{ alert.task_id }}">{{ alert.task_id }}</a>{% else %}—{% endif %}</td>
+<td>{% if alert.level == 'warning' %}Произошло{% elif alert.resolved_at is not none %}Устранено · {{ alert.resolved_at | date }}{% else %}Активно{% endif %}</td></tr>
+{% else %}<tr><td colspan="5">Сигналов пока нет.</td></tr>{% endfor %}
 </table>
 </section>
 <section><h2>Последние успешные входы</h2><ul>

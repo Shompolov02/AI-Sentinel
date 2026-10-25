@@ -60,6 +60,10 @@ class Store:
                     action TEXT NOT NULL, actor TEXT NOT NULL,
                     task_id TEXT, details TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS core_alerts (
+                    id TEXT PRIMARY KEY, at REAL NOT NULL, code TEXT NOT NULL,
+                    task_id TEXT, resolved_at REAL
+                );
             """)
             # Upgrade the accepted-event history without revisiting old verdicts.
             db.execute("BEGIN IMMEDIATE")
@@ -179,7 +183,7 @@ class Store:
                 "SELECT count(*) FROM tasks WHERE state IN ('queued','processing')"
             ).fetchone()[0]
             if count >= 1000:
-                logger.warning("intake_capacity_reached")
+                logger.critical("intake_capacity_reached")
                 raise HTTPException(503, "Intake capacity reached; retry later")
             task_id = str(uuid4())
             db.execute(
@@ -202,6 +206,15 @@ class Store:
                     "ORDER BY created LIMIT 1000"
                 )
             ]
+
+    def intake_full(self) -> bool:
+        with self.connection() as db:
+            return bool(
+                db.execute(
+                    "SELECT count(*) >= 1000 FROM tasks "
+                    "WHERE state IN ('queued','processing')"
+                ).fetchone()[0]
+            )
 
     def process(self, task_id: str, now: float) -> None:
         with self.connection() as db:
@@ -420,7 +433,7 @@ class Store:
             "audit": audit,
         }
 
-    def recent(self) -> list[dict[str, Any]]:
+    def recent(self, q: str = "", state: str = "") -> list[dict[str, Any]]:
         with self.connection() as db:
             return [
                 dict(row)
@@ -428,7 +441,10 @@ class Store:
                     "SELECT id, state, created, verdict, "
                     "json_extract(event, '$.event_type') AS event_type, "
                     "json_extract(event, '$.login.outcome') AS outcome FROM tasks "
-                    "ORDER BY created DESC, rowid DESC LIMIT 100"
+                    "WHERE (? = '' OR state = ?) "
+                    "AND instr(lower(id), lower(?)) > 0 "
+                    "ORDER BY created DESC, rowid DESC LIMIT 100",
+                    (state, state, q),
                 )
             ]
 
@@ -439,5 +455,25 @@ class Store:
                 for row in db.execute(
                     "SELECT at FROM audit WHERE action = 'login_succeeded' "
                     "ORDER BY id DESC LIMIT 10"
+                )
+            ]
+
+    def alert_history(self) -> list[dict[str, Any]]:
+        with self.connection() as db:
+            return [
+                dict(row)
+                for row in db.execute(
+                    "SELECT at, task_id, level, code, resolved_at FROM ("
+                    "SELECT at, task_id, 'warning' AS level, "
+                    "CASE WHEN action = 'failed' THEN 'analysis_error' "
+                    "ELSE json_extract(details, '$.reason_code') END AS code, "
+                    "NULL AS resolved_at, id AS ordinal, 0 AS source FROM audit "
+                    "WHERE action = 'fallback_warning' OR "
+                    "(action = 'failed' AND "
+                    "json_extract(details, '$.reason') = 'analysis_error') "
+                    "UNION ALL SELECT at, task_id, 'critical', code, "
+                    "resolved_at, rowid, 1 "
+                    "FROM core_alerts) "
+                    "ORDER BY at DESC, source DESC, ordinal DESC LIMIT 100"
                 )
             ]
