@@ -16,6 +16,7 @@ services:
     mem_limit: 256m
     pids_limit: 64
     environment:
+      COWRIE_STORAGE_GROUP: "999"
       COWRIE_SENSOR_ID: ${COWRIE_SENSOR_ID:?Set COWRIE_SENSOR_ID}
     volumes:
       - cowrie-logs:/cowrie-logs:ro

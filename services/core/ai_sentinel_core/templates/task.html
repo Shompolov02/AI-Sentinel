@@ -7,7 +7,7 @@
 <dt>Сессия</dt><dd>{{ item.event.session_id }}</dd>
 <dt>Источник</dt><dd>{{ item.event.source_ip }}:{{ item.event.source_port }}</dd>
 <dt>Протокол</dt><dd>{{ item.event.protocol }}</dd>
-{% if item.event.event_type == 'command' %}<dt>Команда (недоверенный текст)</dt><dd><pre data-command-text>{% if item.event.command.text is none %}Текст команды недоступен: источник удалён.{% else %}{{ item.event.command.text }}{% endif %}</pre></dd>{% else %}<dt>Логин</dt><dd>{{ item.event.login.username }}</dd>{% endif %}
+{% if item.event.event_type == 'command' %}<dt>Команда (недоверенный текст)</dt><dd><pre data-command-text>{% if item.event.command.text is none %}{% if item.evidence | selectattr('source_status', 'equalto', 'deleted') | list %}Текст команды недоступен: источник удалён.{% else %}Текст команды удалён по сроку хранения.{% endif %}{% else %}{{ item.event.command.text }}{% endif %}</pre></dd>{% else %}<dt>Логин</dt><dd>{{ item.event.login.username }}</dd>{% endif %}
 </dl></section>
 {% if item.state == 'failed' and item.event.event_type == 'login_attempt' and item.event.login.outcome == 'success' %}
 <p>Не удалось оценить: задача завершилась до внедрения политики входов либо с ошибкой анализа. Вердикт не сформирован.</p>

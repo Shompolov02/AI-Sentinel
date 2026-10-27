@@ -24,6 +24,8 @@ ACTIONS = {
     "failed": "Не удалось оценить",
 }
 ALERT_REASONS = {
+    "retention_cleanup_failed": "Не удалось удалить текст по сроку",
+    "text_expired": "Срок хранения текста истёк; оценка невозможна",
     "prompt_injection_detected": "Резервный анализ: обнаружена Prompt Injection",
     "insufficient_rules": "Резервный анализ: недостаточно правил",
     "guard_unavailable": "Резервный анализ: Guard недоступен",

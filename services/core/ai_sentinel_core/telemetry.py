@@ -5,8 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +17,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 from pydantic import BaseModel, IPvAnyAddress, ValidationError
 
 from .contracts import Event, Port, Text
+from .storage import METADATA_TTL, connect, file_gate, share_storage, text_expired
 
 logger = logging.getLogger("ai_sentinel_telemetry")
 MAX_LINE = 65536
@@ -30,12 +32,34 @@ class Connection(BaseModel):
 
 
 class Journal:
-    def __init__(self, database: Path, sensor: str) -> None:
+    def __init__(
+        self, database: Path, sensor: str, *, clock: Callable[[], float] | None = None
+    ) -> None:
         self.database = database
         self.sensor = sensor
+        self.shared_group = (
+            int(os.environ["COWRIE_STORAGE_GROUP"])
+            if os.environ.get("COWRIE_STORAGE_GROUP")
+            else None
+        )
+        self.clock = clock or (lambda: datetime.now(timezone.utc).timestamp())
         if not sensor or len(sensor) > 64 or ":" in sensor:
             raise ValueError("Invalid sensor ID")
         database.parent.mkdir(parents=True, exist_ok=True)
+        if self.shared_group is not None:
+            share_storage(database.parent, self.shared_group, directory=True)
+            try:
+                descriptor = os.open(
+                    database, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o660
+                )
+            except FileExistsError:
+                pass
+            else:
+                os.close(descriptor)
+            for suffix in ("", "-journal", "-wal", "-shm", ".retention.lock"):
+                path = Path(str(database) + suffix)
+                if path.exists():
+                    share_storage(path, self.shared_group)
         with self.connection() as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS sensor (id TEXT PRIMARY KEY);
@@ -50,25 +74,139 @@ class Journal:
                     id TEXT PRIMARY KEY, payload TEXT NOT NULL,
                     task_id TEXT
                 );
+                CREATE TABLE IF NOT EXISTS delivery_retention (
+                    id TEXT PRIMARY KEY, expires REAL NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS quarantine (
                     reference TEXT PRIMARY KEY, reason TEXT NOT NULL,
                     length INTEGER NOT NULL, digest TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS source_ranges (
+                    reference TEXT PRIMARY KEY, generation TEXT NOT NULL,
+                    position INTEGER NOT NULL, length INTEGER NOT NULL,
+                    received REAL, state TEXT NOT NULL DEFAULT 'live'
+                );
+                CREATE TABLE IF NOT EXISTS source_digests (
+                    reference TEXT PRIMARY KEY, digest TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS source_prefixes (
+                    generation TEXT, digest TEXT, PRIMARY KEY(generation,digest)
+                );
+                CREATE TABLE IF NOT EXISTS compressed_files (
+                    path TEXT PRIMARY KEY, kind TEXT, generation TEXT,
+                    device INTEGER, inode INTEGER, digest TEXT, received REAL
+                );
+                CREATE TABLE IF NOT EXISTS compressed_jobs (
+                    path TEXT PRIMARY KEY, temporary TEXT, kind TEXT,
+                    generation TEXT, received REAL, device INTEGER, inode INTEGER,
+                    digest TEXT, output_digest TEXT
+                );
+                CREATE TABLE IF NOT EXISTS erasure_files (
+                    generation TEXT PRIMARY KEY, device INTEGER, inode INTEGER
+                );
+                CREATE TABLE IF NOT EXISTS buffer_retention (
+                    id INTEGER PRIMARY KEY, cutoff REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS retention_files (
+                    generation TEXT PRIMARY KEY
+                );
+                CREATE TABLE IF NOT EXISTS collector_retention_meta (
+                    id INTEGER PRIMARY KEY
+                );
+                CREATE TABLE IF NOT EXISTS session_receipts (
+                    session TEXT PRIMARY KEY, received REAL
+                );
+                CREATE TABLE IF NOT EXISTS session_artifacts (
+                    name TEXT NOT NULL, session TEXT NOT NULL,
+                    PRIMARY KEY(name, session)
+                );
             """)
+            scrub = (
+                db.execute("SELECT 1 FROM collector_retention_meta").fetchone() is None
+            )
             prior = db.execute("SELECT id FROM sensor").fetchone()
             if prior and prior[0] != sensor:
                 raise ValueError("Collector volume belongs to a different sensor")
             db.execute("INSERT OR IGNORE INTO sensor VALUES (?)", (sensor,))
+            db.execute(
+                "INSERT OR IGNORE INTO session_receipts "
+                "SELECT session, NULL FROM connections"
+            )
+            for row in db.execute("SELECT generation, identity FROM files").fetchall():
+                db.execute(
+                    "INSERT OR IGNORE INTO source_prefixes VALUES (?,?)",
+                    (row["generation"], row["identity"].split(":", 2)[2]),
+                )
+            missing = db.execute(
+                "SELECT id, payload FROM outbox WHERE id NOT IN "
+                "(SELECT id FROM delivery_retention)"
+            ).fetchall()
+            legacy_receipts = (
+                {
+                    str(uuid5(NAMESPACE_URL, row["reference"])): row["received"]
+                    for row in db.execute(
+                        "SELECT reference, received FROM source_ranges"
+                    )
+                }
+                if any(row["payload"] == "{}" for row in missing)
+                else {}
+            )
+            for row in missing:
+                received = legacy_receipts.get(row["id"])
+                if row["payload"] != "{}":
+                    received = datetime.fromisoformat(
+                        json.loads(row["payload"])["received_at"].replace("Z", "+00:00")
+                    ).timestamp()
+                db.execute(
+                    "INSERT INTO delivery_retention VALUES (?,?)",
+                    (
+                        row["id"],
+                        received + METADATA_TTL
+                        if received is not None
+                        else self.clock(),
+                    ),
+                )
+        if scrub:
+            with self.connection() as db:
+                db.execute("VACUUM")
+                db.execute("INSERT OR IGNORE INTO collector_retention_meta VALUES (1)")
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
-        db = sqlite3.connect(self.database, timeout=5)
-        db.row_factory = sqlite3.Row
-        try:
-            with db:
-                yield db
-        finally:
-            db.close()
+        with file_gate(self.database, group=self.shared_group):
+            db = connect(self.database, timeout=5)
+            try:
+                with db:
+                    yield db
+            finally:
+                db.close()
+
+    def remember_range(
+        self,
+        db: sqlite3.Connection,
+        generation: str,
+        start: int,
+        length: int,
+        *,
+        received: float | None = None,
+        legacy_unknown: bool = False,
+    ) -> None:
+        reference = f"cowrie:{self.sensor}:{generation}:{start}"
+        observed = self.clock() if received is None else received
+        # Persist exactly the timestamp that Event's ISO representation carries.
+        # A sub-microsecond difference must not split Core and source deadlines.
+        observed = datetime.fromtimestamp(observed, timezone.utc).timestamp()
+        db.execute(
+            "INSERT OR IGNORE INTO source_ranges "
+            "(reference,generation,position,length,received) VALUES (?,?,?,?,?)",
+            (
+                reference,
+                generation,
+                start,
+                length,
+                None if legacy_unknown else observed,
+            ),
+        )
 
     def scan(self, directory: Path) -> None:
         for path in sorted(
@@ -78,6 +216,8 @@ class Journal:
                 continue
             with path.open("rb") as stream, self.connection() as db:
                 db.execute("BEGIN IMMEDIATE")
+                if db.execute("SELECT 1 FROM erasure_files LIMIT 1").fetchone():
+                    return  # An interrupted first-line erasure must recover first.
                 first = stream.readline(MAX_LINE + 1)
                 if not first or (not first.endswith(b"\n") and len(first) <= MAX_LINE):
                     continue
@@ -93,6 +233,72 @@ class Journal:
                 offset = row["offset"] if row else 0
                 if stat.st_size < offset:
                     generation, offset = str(uuid4()), 0
+                db.execute(
+                    "INSERT OR IGNORE INTO source_prefixes VALUES (?,?)",
+                    (generation, hashlib.sha256(first).hexdigest()),
+                )
+                if (
+                    row
+                    and db.execute(
+                        "SELECT 1 FROM retention_files WHERE generation=?",
+                        (generation,),
+                    ).fetchone()
+                    is None
+                ):
+                    # Old cursor-only volumes have no per-record receipt ledger.
+                    # Recover known receipts from outbox; unknown legacy text is
+                    # immediately due under the owner's migration decision.
+                    known = {
+                        event["raw_record_ref"]: datetime.fromisoformat(
+                            event["received_at"].replace("Z", "+00:00")
+                        ).timestamp()
+                        for saved in db.execute(
+                            "SELECT payload FROM outbox WHERE payload != '{}'"
+                        )
+                        for event in [json.loads(saved[0])]
+                    }
+                    stream.seek(0)
+                    while stream.tell() < offset:
+                        start = stream.tell()
+                        raw = stream.readline(MAX_LINE + 1)
+                        if not raw:
+                            break
+                        while not raw.endswith(b"\n") and stream.tell() < offset:
+                            tail = stream.readline(MAX_LINE + 1)
+                            if not tail:
+                                break
+                            raw = tail
+                        length = stream.tell() - start
+                        reference = f"cowrie:{self.sensor}:{generation}:{start}"
+                        self.remember_range(
+                            db,
+                            generation,
+                            start,
+                            length,
+                            received=known.get(reference),
+                            legacy_unknown=reference not in known,
+                        )
+                for retained in db.execute(
+                    "SELECT reference,position,length FROM source_ranges "
+                    "WHERE generation=? AND state='live' AND reference NOT IN "
+                    "(SELECT reference FROM source_digests)",
+                    (generation,),
+                ).fetchall():
+                    stream.seek(retained["position"])
+                    digest = hashlib.sha256()
+                    remaining = retained["length"]
+                    while remaining:
+                        block = stream.read(min(remaining, MAX_LINE))
+                        if not block:
+                            raise OSError(
+                                "Source truncated during fingerprint migration"
+                            )
+                        digest.update(block)
+                        remaining -= len(block)
+                    db.execute(
+                        "INSERT INTO source_digests VALUES (?,?)",
+                        (retained["reference"], digest.hexdigest()),
+                    )
                 stream.seek(offset)
                 # Bound one poll, while preserving cursor and outbox atomically.
                 for _ in range(1000):
@@ -111,6 +317,14 @@ class Journal:
                             length += len(raw)
                         if not raw:
                             break  # Even an oversized line can still be in flight.
+                        self.remember_range(db, generation, start, length)
+                        db.execute(
+                            "INSERT OR IGNORE INTO source_digests VALUES (?,?)",
+                            (
+                                f"cowrie:{self.sensor}:{generation}:{start}",
+                                digest.hexdigest(),
+                            ),
+                        )
                         self.quarantine(
                             db,
                             generation,
@@ -123,11 +337,22 @@ class Journal:
                     elif not raw.endswith(b"\n"):
                         break  # Writer has not finished this line yet.
                     else:
+                        self.remember_range(db, generation, start, len(raw))
+                        db.execute(
+                            "INSERT OR IGNORE INTO source_digests VALUES (?,?)",
+                            (
+                                f"cowrie:{self.sensor}:{generation}:{start}",
+                                hashlib.sha256(raw).hexdigest(),
+                            ),
+                        )
                         self.record(db, generation, start, raw)
                     offset = stream.tell()
                 db.execute(
                     "INSERT OR REPLACE INTO files VALUES (?,?,?,?)",
                     (identity, generation, path.name, offset),
+                )
+                db.execute(
+                    "INSERT OR IGNORE INTO retention_files VALUES (?)", (generation,)
                 )
 
     def record(
@@ -146,7 +371,26 @@ class Journal:
                     "INSERT OR REPLACE INTO connections VALUES (?,?)",
                     (connect.session, connect.model_dump_json()),
                 )
+                reference = f"cowrie:{self.sensor}:{generation}:{offset}"
+                received = db.execute(
+                    "SELECT received FROM source_ranges WHERE reference=?", (reference,)
+                ).fetchone()[0]
+                db.execute(
+                    "INSERT OR IGNORE INTO session_receipts VALUES (?,?)",
+                    (connect.session, received),
+                )
                 return
+            if isinstance(record.get("session"), str):
+                for field in ("ttylog", "outfile", "shasum"):
+                    artifact = record.get(field)
+                    if (
+                        isinstance(artifact, str)
+                        and 0 < len(Path(artifact).name) <= 256
+                    ):
+                        db.execute(
+                            "INSERT OR IGNORE INTO session_artifacts VALUES (?,?)",
+                            (Path(artifact).name, record["session"]),
+                        )
             if kind not in (
                 "cowrie.login.failed",
                 "cowrie.login.success",
@@ -182,7 +426,13 @@ class Journal:
                     "schema_version": 1,
                     "event_id": str(uuid5(NAMESPACE_URL, reference)),
                     "occurred_at": record["timestamp"],
-                    "received_at": datetime.now(timezone.utc).isoformat(),
+                    "received_at": datetime.fromtimestamp(
+                        db.execute(
+                            "SELECT received FROM source_ranges WHERE reference = ?",
+                            (reference,),
+                        ).fetchone()[0],
+                        timezone.utc,
+                    ).isoformat(),
                     "event_type": "command"
                     if kind == "cowrie.command.input"
                     else "login_attempt",
@@ -203,6 +453,10 @@ class Journal:
             db.execute(
                 "INSERT OR IGNORE INTO outbox VALUES (?,?,NULL)",
                 (str(event.event_id), payload),
+            )
+            db.execute(
+                "INSERT OR IGNORE INTO delivery_retention VALUES (?,?)",
+                (str(event.event_id), event.received_at.timestamp() + METADATA_TTL),
             )
         except (ValueError, KeyError, TypeError, ValidationError, RecursionError):
             self.quarantine(db, generation, offset, raw, "invalid_record")
@@ -231,14 +485,61 @@ class Journal:
         logger.warning("record_quarantined reference=%s reason=%s", reference, reason)
 
     def pending(self) -> list[dict[str, Any]]:
+        self.expire_text(self.clock())
+        self.expire_metadata(self.clock())
         with self.connection() as db:
             return [
                 json.loads(row[0])
                 for row in db.execute(
                     "SELECT payload FROM outbox WHERE task_id IS NULL "
+                    "AND payload != '{}' "
                     "ORDER BY rowid LIMIT 100"
                 )
             ]
+
+    def expire_text(self, now: float) -> int:
+        expired = 0
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            for row in db.execute(
+                "SELECT id, payload, task_id FROM outbox WHERE payload != '{}'"
+            ).fetchall():
+                if text_expired(json.loads(row["payload"]), now):
+                    db.execute(
+                        "UPDATE outbox SET payload = '{}' WHERE id = ?", (row["id"],)
+                    )
+                    expired += 1
+                    if row["task_id"] is None:
+                        logger.critical("buffer_event_expired event_id=%s", row["id"])
+            if expired:
+                db.execute(
+                    "INSERT INTO buffer_retention VALUES (1,?) "
+                    "ON CONFLICT(id) DO UPDATE SET cutoff=max(cutoff,excluded.cutoff)",
+                    (now,),
+                )
+        return expired
+
+    def expire_metadata(self, now: float) -> None:
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "DELETE FROM outbox WHERE id IN "
+                "(SELECT id FROM delivery_retention WHERE expires <= ?)",
+                (now,),
+            )
+            db.execute("DELETE FROM delivery_retention WHERE expires <= ?", (now,))
+            # Retain unfinished erasure intent until physical cleanup succeeds.
+            # File cursors remain operational state so old bytes are not rescanned.
+            db.execute(
+                "DELETE FROM source_ranges WHERE state='erased' "
+                "AND (received IS NULL OR received + ? <= ?)",
+                (METADATA_TTL, now),
+            )
+
+            db.execute(
+                "DELETE FROM source_digests WHERE reference NOT IN "
+                "(SELECT reference FROM source_ranges)"
+            )
 
     def acknowledge(self, event_id: str, task_id: str) -> None:
         with self.connection() as db:

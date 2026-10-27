@@ -17,6 +17,7 @@ def main() -> None:
             raise ValueError("Expected command text")
         result = classifier.inspect(text)
         print(json.dumps(result), flush=True)
+        del text, line
 
 
 if __name__ == "__main__":

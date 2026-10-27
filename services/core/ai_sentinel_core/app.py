@@ -31,6 +31,7 @@ from .alerts import CriticalAlerts
 from .auth import session_digest, verify_password
 from .contracts import Event
 from .raw_source import SourceReader
+from .storage import text_expired
 from .store import Store
 
 logger = logging.getLogger("ai_sentinel_core")
@@ -53,7 +54,7 @@ class LoginRequest(BaseModel):
 
 
 def create_app(settings: Settings) -> FastAPI:
-    store = Store(settings.database, settings.guard_model)
+    store = Store(settings.database, settings.guard_model, clock=settings.clock)
     critical = CriticalAlerts(store)
     queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1000)
     scheduled: set[str] = set()
@@ -106,12 +107,30 @@ def create_app(settings: Settings) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        async def maintain_retention() -> None:
+            while True:
+                try:
+                    await asyncio.to_thread(store.expire_text, settings.clock())
+                    await asyncio.to_thread(store.expire_metadata, settings.clock())
+                    critical.active()
+                    critical.resolve("retention_cleanup_failed", settings.clock())
+                except (OSError, sqlite3.Error) as error:
+                    critical.raise_alert("retention_cleanup_failed", settings.clock())
+                    logger.critical("retention_cleanup_failed")
+                    report_disk_error(error)
+                await asyncio.sleep(1)
+
+        await asyncio.to_thread(store.expire_text, settings.clock())
         for task_id in store.pending():
             schedule(task_id)
         runner = asyncio.create_task(worker())
+        maintenance = asyncio.create_task(maintain_retention())
         try:
             yield
         finally:
+            maintenance.cancel()
+            with suppress(asyncio.CancelledError):
+                await maintenance
             runner.cancel()
             with suppress(asyncio.CancelledError):
                 await runner
@@ -240,6 +259,8 @@ def create_app(settings: Settings) -> FastAPI:
         state: Literal["", "queued", "processing", "completed", "failed"] = "",
         role: str = Depends(require_reader),
     ) -> str:
+        store.expire_text(settings.clock())
+        critical.resolve("retention_cleanup_failed", settings.clock())
         q = q.strip()
         if store.intake_full():
             critical.raise_alert("intake_capacity_reached", settings.clock())
@@ -281,8 +302,9 @@ def create_app(settings: Settings) -> FastAPI:
             )
             if status != "deleted" and settings.source_reader is not None:
                 try:
-                    settings.source_reader(event)
-                    status = "available"
+                    settings.source_reader(source_lookup(event))
+                    if not text_expired(event, settings.clock()):
+                        status = "available"
                 except HTTPError as error:
                     error.close()
                     if error.code == 410:
@@ -294,7 +316,6 @@ def create_app(settings: Settings) -> FastAPI:
                     pass
             evidence["source_status"] = status
             if status == "deleted" and event["event_type"] == "command":
-                # Presentation only: physical deletion of all copies belongs to #51.
                 event["command"]["text"] = None
             if status != "available":
                 continue
@@ -307,11 +328,26 @@ def create_app(settings: Settings) -> FastAPI:
             evidence["excerpt"] = text[:512]
             evidence["excerpt_truncated"] = len(text) > 512
             evidence["raw_url"] = f"/api/tasks/{task_id}/evidence/{evidence['id']}/raw"
+        # A remote lookup may finish after the task deadline or deletion.
+        store.task(task_id)
+        if text_expired(event, settings.clock()):
+            if event["event_type"] == "command":
+                event["command"]["text"] = None
+            for evidence in item["evidence"]:
+                for field in ("excerpt", "excerpt_truncated", "raw_url"):
+                    evidence.pop(field, None)
+                if evidence.get("source_status") == "available":
+                    evidence["source_status"] = "unavailable"
         return item
 
     @app.get("/api/tasks/{task_id}", dependencies=[Depends(require_reader)])
     def task(task_id: str) -> dict[str, Any]:
         return task_evidence(task_id)
+
+    def source_lookup(event: dict[str, Any]) -> dict[str, Any]:
+        if event.get("command") is not None and event["command"]["text"] is None:
+            return {**event, "command": None}
+        return event
 
     @app.get(
         "/api/tasks/{task_id}/evidence/{evidence_id}/raw",
@@ -329,9 +365,14 @@ def create_app(settings: Settings) -> FastAPI:
         if settings.source_reader is None:
             raise HTTPException(503, "Source reader unavailable")
         try:
-            return PlainTextResponse(settings.source_reader(item["event"]))
+            content = settings.source_reader(source_lookup(item["event"]))
+            store.task(task_id)
+            if text_expired(item["event"], settings.clock()):
+                raise HTTPException(503, "Source cleanup pending")
+            return PlainTextResponse(content)
         except HTTPError as error:
             error.close()
+            store.task(task_id)
             if error.code == 410:
                 store.confirm_source_deleted(
                     item["event"]["event_id"], settings.clock()

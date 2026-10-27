@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import os
@@ -9,12 +10,13 @@ import secrets
 import sqlite3
 import ssl
 import stat
+import time
 from collections.abc import Callable
-from contextlib import closing
+from contextlib import ExitStack, closing
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 from urllib.request import HTTPSHandler, ProxyHandler, Request, build_opener
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -22,11 +24,30 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi import Request as WebRequest
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse
+from pydantic import model_validator
 
+from .compressed_retention import digest_stream
 from .contracts import Event
+from .storage import TEXT_TTL, file_gate
 from .telemetry import MAX_LINE
 
 SourceReader = Callable[[dict[str, Any]], str]
+
+
+class SourceRequest(Event):
+    """An erased event can still query deletion proof without its command."""
+
+    @model_validator(mode="after")
+    def matching_outcome(self) -> SourceRequest:
+        if (
+            self.event_type == "command"
+            and self.cowrie_event_type == "cowrie.command.input"
+            and self.command is None
+            and self.login is None
+        ):
+            return self
+        Event.model_validate(self.model_dump())
+        return self
 
 
 @dataclass(frozen=True)
@@ -34,6 +55,7 @@ class ReaderSettings:
     logs: Path
     registry: Path
     tokens: Path
+    clock: Callable[[], float] = time.time
 
 
 def tls_reader(tokens: Path, ca: Path) -> SourceReader:
@@ -62,6 +84,11 @@ def tls_reader(tokens: Path, ca: Path) -> SourceReader:
 
 
 def read_record(settings: ReaderSettings, event: Event) -> str:
+    with file_gate(settings.registry, readonly=True):
+        return _read_record(settings, event)
+
+
+def _read_record(settings: ReaderSettings, event: Event) -> str:
     try:
         kind, sensor, generation, position = event.raw_record_ref.split(":")
         if (
@@ -77,13 +104,40 @@ def read_record(settings: ReaderSettings, event: Event) -> str:
         with closing(
             sqlite3.connect(settings.registry.resolve().as_uri() + "?mode=ro", uri=True)
         ) as db:
+            receipt = db.execute(
+                "SELECT state, received FROM source_ranges WHERE reference = ?",
+                (event.raw_record_ref,),
+            ).fetchone()
+            if receipt:
+                if receipt[0] == "erased":
+                    raise HTTPException(410, "Source deleted")
+                if (
+                    receipt[0] == "prepared"
+                    or receipt[1] is None
+                    or settings.clock() >= receipt[1] + TEXT_TTL
+                ):
+                    raise HTTPException(503, "Source cleanup pending")
             if db.execute("SELECT id FROM sensor").fetchone() != (sensor,):
                 raise ValueError("Unknown sensor")
             rows = db.execute(
                 "SELECT identity, path FROM files WHERE generation = ?", (generation,)
             ).fetchall()
+            pending_archive = (
+                db.execute(
+                    "SELECT 1 FROM compressed_jobs WHERE generation=? LIMIT 1",
+                    (generation,),
+                ).fetchone()
+                is not None
+            )
+            archives = db.execute(
+                "SELECT device,inode,digest FROM compressed_files "
+                "WHERE generation=? AND kind='raw'",
+                (generation,),
+            ).fetchall()
         if not rows:
             raise HTTPException(404, "Unknown source generation")
+        if event.event_type == "command" and event.command is None:
+            raise HTTPException(503, "Source cleanup pending")
         directory = os.open(settings.logs, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             names = [
@@ -98,9 +152,18 @@ def read_record(settings: ReaderSettings, event: Event) -> str:
         replaced = False
         # Search by registered identity, including a rename not yet seen by scan().
         candidates = [
-            (row[0], name) for row in rows for name in names if not name.endswith(".gz")
+            (row[0], name, False)
+            for row in rows
+            for name in names
+            if not name.endswith(".gz")
         ]
-        for identity, name in candidates:
+        candidates += [
+            (f"{row[0]}:{row[1]}:{row[2]}", name, True)
+            for row in archives
+            for name in names
+            if name.endswith(".gz")
+        ]
+        for identity, name, compressed in candidates:
             directory = os.open(
                 settings.logs, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
             )
@@ -113,19 +176,31 @@ def read_record(settings: ReaderSettings, event: Event) -> str:
                 continue
             finally:
                 os.close(directory)
-            with os.fdopen(descriptor, "rb") as stream:
-                info = os.fstat(stream.fileno())
+            with ExitStack() as stack:
+                physical = stack.enter_context(os.fdopen(descriptor, "rb"))
+                info = os.fstat(physical.fileno())
                 if not stat.S_ISREG(info.st_mode):
                     uncertain = True
                     continue
-                first = stream.readline(MAX_LINE + 1)
-                actual = (
-                    f"{info.st_dev}:{info.st_ino}:" + hashlib.sha256(first).hexdigest()
-                )
+                stream: BinaryIO | gzip.GzipFile
+                if compressed:
+                    if not identity.startswith(f"{info.st_dev}:{info.st_ino}:"):
+                        continue
+                    actual = f"{info.st_dev}:{info.st_ino}:" + digest_stream(physical)
+                    stream = stack.enter_context(
+                        gzip.GzipFile(fileobj=physical, mode="rb")
+                    )
+                else:
+                    stream = physical
+                    first = stream.readline(MAX_LINE + 1)
+                    actual = (
+                        f"{info.st_dev}:{info.st_ino}:"
+                        + hashlib.sha256(first).hexdigest()
+                    )
                 if actual != identity:
                     replaced = replaced or name in registered_names
                     continue
-                if offset >= info.st_size:
+                if not compressed and offset >= info.st_size:
                     raise HTTPException(410, "Source deleted")
                 if offset:
                     stream.seek(offset - 1)
@@ -157,6 +232,8 @@ def read_record(settings: ReaderSettings, event: Event) -> str:
                     ):
                         continue
                 return raw.decode("utf-8")
+        if pending_archive:
+            raise HTTPException(503, "Source cleanup pending")
         if not uncertain and not replaced:
             raise HTTPException(410, "Source deleted")
     except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
@@ -193,7 +270,7 @@ def create_reader_app(settings: ReaderSettings) -> FastAPI:
             raise HTTPException(401, "Core authorization required")
 
     @app.post("/internal/record", dependencies=[Depends(require_core)])
-    def record(event: Event) -> PlainTextResponse:
+    def record(event: SourceRequest) -> PlainTextResponse:
         return PlainTextResponse(read_record(settings, event))
 
     @app.get("/health")
