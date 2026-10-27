@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sqlite3
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -13,13 +15,21 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from .guard import POLICY_VERSION, Guard
+from .storage import METADATA_TTL, TEXT_TTL, connect, text_expired
 
 logger = logging.getLogger("ai_sentinel_core")
 
 
 class Store:
-    def __init__(self, path: Path, guard_model: Path | None = None) -> None:
+    def __init__(
+        self,
+        path: Path,
+        guard_model: Path | None = None,
+        *,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
         self.path = path
+        self.clock = clock
         self.guard = Guard(guard_model)
         path.parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as db:
@@ -64,7 +74,20 @@ class Store:
                     id TEXT PRIMARY KEY, at REAL NOT NULL, code TEXT NOT NULL,
                     task_id TEXT, resolved_at REAL
                 );
+                CREATE TABLE IF NOT EXISTS retained_events (
+                    task_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL,
+                    text_expires REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS task_retention (
+                    task_id TEXT PRIMARY KEY, expires REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS command_text (
+                    task_id TEXT PRIMARY KEY, text TEXT NOT NULL,
+                    expires REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS retention_meta (id INTEGER PRIMARY KEY);
             """)
+            scrub_legacy = db.execute("SELECT 1 FROM retention_meta").fetchone() is None
             # Upgrade the accepted-event history without revisiting old verdicts.
             db.execute("BEGIN IMMEDIATE")
             if legacy_sessions:
@@ -77,6 +100,121 @@ class Store:
                 "ON o.task_id = t.id WHERE o.task_id IS NULL ORDER BY t.rowid"
             ).fetchall():
                 self.observe_login(db, row["id"], json.loads(row["event"]))
+            for row in db.execute(
+                "SELECT id, event FROM tasks WHERE id NOT IN "
+                "(SELECT task_id FROM retained_events)"
+            ).fetchall():
+                self.retain_event(db, row["id"], row["event"])
+            for row in db.execute(
+                "SELECT id, event, created FROM tasks WHERE id NOT IN "
+                "(SELECT task_id FROM task_retention)"
+            ).fetchall():
+                self.retain_metadata(db, row["id"], row["event"], row["created"])
+        self.expire_text(self.clock())
+        self.expire_metadata(self.clock())
+        if scrub_legacy:
+            with self.connection() as db:
+                db.execute("VACUUM")
+                db.execute("INSERT OR IGNORE INTO retention_meta VALUES (1)")
+
+    def retain_event(self, db: sqlite3.Connection, task_id: str, payload: str) -> str:
+        event = json.loads(payload)
+        try:
+            expires = (
+                datetime.fromisoformat(
+                    event["received_at"].replace("Z", "+00:00")
+                ).timestamp()
+                + TEXT_TTL
+            )
+        except (KeyError, ValueError, TypeError, AttributeError):
+            # Unknown historical text must not acquire a new lifetime.
+            expires = self.clock()
+        db.execute(
+            "INSERT INTO retained_events VALUES (?,?,?)",
+            (task_id, hashlib.sha256(payload.encode()).hexdigest(), expires),
+        )
+        if event["event_type"] == "command":
+            db.execute(
+                "INSERT INTO command_text VALUES (?,?,?)",
+                (
+                    task_id,
+                    event["command"]["text"],
+                    expires,
+                ),
+            )
+            event["command"]["text"] = None
+            payload = json.dumps(event, sort_keys=True)
+            db.execute("UPDATE tasks SET event = ? WHERE id = ?", (payload, task_id))
+        return payload
+
+    @staticmethod
+    def retain_metadata(
+        db: sqlite3.Connection, task_id: str, payload: str, created: float
+    ) -> None:
+        event = json.loads(payload)
+        try:
+            received = datetime.fromisoformat(
+                event["received_at"].replace("Z", "+00:00")
+            ).timestamp()
+        except (KeyError, ValueError, TypeError, AttributeError):
+            # Legacy Core admission is known even when telemetry receipt is not.
+            received = created
+        db.execute(
+            "INSERT INTO task_retention VALUES (?,?)",
+            (task_id, received + METADATA_TTL),
+        )
+
+    def expire_metadata(self, now: float) -> None:
+        with self.connection() as db:
+            if (
+                db.execute(
+                    "SELECT 1 FROM task_retention WHERE expires <= ? "
+                    "UNION ALL SELECT 1 FROM audit WHERE at <= ? "
+                    "UNION ALL SELECT 1 FROM core_alerts WHERE at <= ? LIMIT 1",
+                    (now, now - METADATA_TTL, now - METADATA_TTL),
+                ).fetchone()
+                is None
+            ):
+                return
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "DELETE FROM source_deletions WHERE event_id IN "
+                "(SELECT event_id FROM tasks WHERE id IN "
+                "(SELECT task_id FROM task_retention WHERE expires <= ?))",
+                (now,),
+            )
+            statements = (
+                "DELETE FROM command_text WHERE task_id IN "
+                "(SELECT task_id FROM task_retention WHERE expires <= ?)",
+                "DELETE FROM task_analysis WHERE task_id IN "
+                "(SELECT task_id FROM task_retention WHERE expires <= ?)",
+                "DELETE FROM login_observations WHERE task_id IN "
+                "(SELECT task_id FROM task_retention WHERE expires <= ?)",
+                "DELETE FROM retained_events WHERE task_id IN "
+                "(SELECT task_id FROM task_retention WHERE expires <= ?)",
+                "DELETE FROM audit WHERE task_id IN "
+                "(SELECT task_id FROM task_retention WHERE expires <= ?)",
+                "DELETE FROM core_alerts WHERE task_id IN "
+                "(SELECT task_id FROM task_retention WHERE expires <= ?)",
+                "DELETE FROM tasks WHERE id IN "
+                "(SELECT task_id FROM task_retention WHERE expires <= ?)",
+            )
+            for statement in statements:
+                db.execute(statement, (now,))
+            db.execute("DELETE FROM task_retention WHERE expires <= ?", (now,))
+            db.execute("DELETE FROM audit WHERE at <= ?", (now - METADATA_TTL,))
+            db.execute("DELETE FROM core_alerts WHERE at <= ?", (now - METADATA_TTL,))
+
+    def expire_text(self, now: float) -> None:
+        with self.connection() as db:
+            if (
+                db.execute(
+                    "SELECT 1 FROM command_text WHERE expires <= ? LIMIT 1", (now,)
+                ).fetchone()
+                is None
+            ):
+                return
+            db.execute("DELETE FROM command_text WHERE expires <= ?", (now,))
 
     @staticmethod
     def observe_login(
@@ -100,8 +238,7 @@ class Store:
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
-        db = sqlite3.connect(self.path, timeout=3)
-        db.row_factory = sqlite3.Row
+        db = connect(self.path)
         try:
             with db:
                 yield db
@@ -162,23 +299,34 @@ class Store:
     def confirm_source_deleted(self, event_id: str, now: float) -> None:
         with self.connection() as db:
             db.execute(
-                "INSERT OR IGNORE INTO source_deletions VALUES (?, ?)", (event_id, now)
+                "INSERT OR IGNORE INTO source_deletions "
+                "SELECT ?, ? WHERE EXISTS (SELECT 1 FROM tasks t "
+                "JOIN task_retention r ON r.task_id=t.id "
+                "WHERE t.event_id=? AND r.expires>?)",
+                (event_id, now, event_id, self.clock()),
             )
 
     def accept(self, event: str, event_id: str, now: float) -> dict[str, str]:
+        self.expire_metadata(now)
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             prior = db.execute(
                 "SELECT * FROM tasks WHERE event_id = ?", (event_id,)
             ).fetchone()
             if prior:
-                if prior["event"] != event:
+                fingerprint = db.execute(
+                    "SELECT fingerprint FROM retained_events WHERE task_id = ?",
+                    (prior["id"],),
+                ).fetchone()[0]
+                if fingerprint != hashlib.sha256(event.encode()).hexdigest():
                     raise HTTPException(409, "Event ID content conflict")
                 return {
                     "task_id": prior["id"],
                     "correlation_id": prior["id"],
                     "state": prior["state"],
                 }
+            if text_expired(json.loads(event), now):
+                raise HTTPException(410, "Source retention period expired")
             count = db.execute(
                 "SELECT count(*) FROM tasks WHERE state IN ('queued','processing')"
             ).fetchone()[0]
@@ -192,12 +340,15 @@ class Store:
                 (task_id, event_id, event, now),
             )
             self.observe_login(db, task_id, json.loads(event))
+            self.retain_event(db, task_id, event)
+            self.retain_metadata(db, task_id, event, now)
             self.audit(
                 db, now, "event_accepted", "collector", task_id, {"state": "queued"}
             )
         return {"task_id": task_id, "correlation_id": task_id, "state": "queued"}
 
     def pending(self) -> list[str]:
+        self.expire_metadata(self.clock())
         with self.connection() as db:
             return [
                 row[0]
@@ -217,11 +368,18 @@ class Store:
             )
 
     def process(self, task_id: str, now: float) -> None:
+        self.expire_text(self.clock())
+        self.expire_metadata(self.clock())
         with self.connection() as db:
             row = db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
             if row is None or row["state"] in ("completed", "failed"):
                 return
             event = json.loads(row["event"])
+            text = db.execute(
+                "SELECT text FROM command_text WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            if event["event_type"] == "command" and text is not None:
+                event["command"]["text"] = text[0]
             observation = db.execute(
                 "SELECT failure_count FROM login_observations WHERE task_id = ?",
                 (task_id,),
@@ -274,6 +432,9 @@ class Store:
             "evidence_ids": [evidence_id],
         }
         with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if not self.live_task(db, task_id):
+                return
             db.execute(
                 "UPDATE tasks SET verdict = ?, evidence = ?, state = 'completed' "
                 "WHERE id = ?",
@@ -289,11 +450,41 @@ class Store:
             )
             self.audit(db, now, "completed", "Core", task_id, {"state": "completed"})
 
+    def live_task(self, db: sqlite3.Connection, task_id: str) -> bool:
+        return (
+            db.execute(
+                "SELECT 1 FROM tasks t JOIN task_retention r ON r.task_id=t.id "
+                "WHERE t.id=? AND r.expires>?",
+                (task_id, self.clock()),
+            ).fetchone()
+            is not None
+        )
+
     def process_command(self, task_id: str, event: dict[str, Any], now: float) -> None:
         evidence_id = str(uuid4())
-        guard = self.guard.inspect(event["command"]["text"])
+        expired = event["command"]["text"] is None or text_expired(event, self.clock())
+        guard = (
+            {
+                "status": "error",
+                "score": None,
+                "reason_code": "text_expired",
+                "model_id": None,
+                "revision": None,
+                "threshold": None,
+            }
+            if expired
+            else self.guard.inspect(event["command"]["text"])
+        )
+        if not expired and text_expired(event, self.clock()):
+            self.process_command(task_id, {**event, "command": {"text": None}}, now)
+            return
         blocked = guard["status"] == "blocked"
-        if blocked:
+        if expired:
+            reason_code = "text_expired"
+            reason = (
+                "Срок хранения текста истёк; оставшихся данных недостаточно для оценки."
+            )
+        elif blocked:
             reason_code = "prompt_injection_detected"
             reason = (
                 "Экспериментальный Prompt Guard обнаружил признаки Prompt Injection. "
@@ -338,6 +529,14 @@ class Store:
         state = "completed" if blocked else "failed"
         verdict = {**analysis, "severity": "High"} if blocked else None
         with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if not self.live_task(db, task_id):
+                return
+            if not expired and text_expired(event, self.clock()):
+                # Waiting for SQLite's writer may cross the text deadline.
+                db.rollback()
+                self.process_command(task_id, {**event, "command": {"text": None}}, now)
+                return
             db.execute(
                 "INSERT OR REPLACE INTO task_analysis VALUES (?,?)",
                 (task_id, json.dumps(analysis)),
@@ -385,6 +584,9 @@ class Store:
 
     def fail(self, task_id: str, now: float, reason: str = "analysis_error") -> None:
         with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if not self.live_task(db, task_id):
+                return
             db.execute(
                 "UPDATE tasks SET state = 'failed' "
                 "WHERE id = ? AND state != 'completed'",
@@ -400,10 +602,18 @@ class Store:
             )
 
     def task(self, task_id: str) -> dict[str, Any]:
+        self.expire_text(self.clock())
+        self.expire_metadata(self.clock())
         with self.connection() as db:
             row = db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
             if row is None:
                 raise HTTPException(404, "Task not found")
+            event = json.loads(row["event"])
+            text = db.execute(
+                "SELECT text FROM command_text WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            if event["event_type"] == "command" and text is not None:
+                event["command"]["text"] = text[0]
             analysis = db.execute(
                 "SELECT payload FROM task_analysis WHERE task_id = ?", (task_id,)
             ).fetchone()
@@ -420,7 +630,7 @@ class Store:
             "task_id": task_id,
             "correlation_id": task_id,
             "state": row["state"],
-            "event": json.loads(row["event"]),
+            "event": event,
             "created_at": row["created"],
             "verdict": json.loads(row["verdict"]) if row["verdict"] else None,
             "analysis": json.loads(analysis["payload"]) if analysis else None,
@@ -434,6 +644,7 @@ class Store:
         }
 
     def recent(self, q: str = "", state: str = "") -> list[dict[str, Any]]:
+        self.expire_metadata(self.clock())
         with self.connection() as db:
             return [
                 dict(row)

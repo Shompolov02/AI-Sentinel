@@ -1,0 +1,56 @@
+# Apply after core and collector; Evidence/Guard overlays remain independent.
+services:
+  cowrie:
+    command:
+      - /cowrie/cowrie-env/bin/twistd
+      - -n
+      - --umask=0002
+      - --pidfile=
+      - --logger
+      - cowrie.python.logfile.logger
+      - cowrie
+
+  retention:
+    build:
+      context: ..
+      dockerfile: services/core/Dockerfile
+      target: runtime
+    image: ai-sentinel-core:local
+    user: "999:999"
+    group_add: ["999"]
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: "0.5"
+    mem_limit: 128m
+    pids_limit: 32
+    network_mode: none
+    command: [python, -m, ai_sentinel_core.retention, --role, raw]
+    environment:
+      COWRIE_STORAGE_GROUP: "999"
+      COWRIE_SENSOR_ID: ${COWRIE_SENSOR_ID:?Set COWRIE_SENSOR_ID}
+      COLLECTOR_DB_PATH: /data/collector.db
+      COWRIE_LOG_DIR: /cowrie-logs
+      COWRIE_TTY_DIR: /cowrie-tty
+      COWRIE_DOWNLOAD_DIR: /cowrie-downloads
+    volumes:
+      - collector-data:/data
+      - cowrie-logs:/cowrie-logs
+      - cowrie-downloads:/cowrie-downloads
+      - type: volume
+        source: cowrie-state
+        target: /cowrie-tty
+        volume:
+          subpath: tty
+    depends_on:
+      cowrie:
+        condition: service_healthy
+      collector:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, "import time; from pathlib import Path; assert time.time()-Path('/data/retention-heartbeat').stat().st_mtime<10"]
+      interval: 5s
+      timeout: 3s
+      retries: 5

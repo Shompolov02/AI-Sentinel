@@ -5,6 +5,7 @@ from threading import RLock
 from typing import Any
 from uuid import uuid4
 
+from .storage import METADATA_TTL
 from .store import Store
 
 
@@ -21,8 +22,24 @@ class CriticalAlerts:
             }
         self.pending: dict[str, dict[str, Any]] = {}
 
+    def prune(self, now: float, live_tasks: set[str] | None = None) -> None:
+        def keep(episode: dict[str, Any]) -> bool:
+            return episode["at"] + METADATA_TTL > now and (
+                live_tasks is None
+                or episode["task_id"] is None
+                or episode["task_id"] in live_tasks
+            )
+
+        self.current = {
+            key: value for key, value in self.current.items() if keep(value)
+        }
+        self.pending = {
+            key: value for key, value in self.pending.items() if keep(value)
+        }
+
     def raise_alert(self, code: str, now: float, task_id: str | None = None) -> bool:
         with self.lock:
+            self.prune(now)
             key = code + ":" + (task_id or "")
             if key in self.current:
                 return False
@@ -39,6 +56,7 @@ class CriticalAlerts:
 
     def resolve(self, code: str, now: float, task_id: str | None = None) -> None:
         with self.lock:
+            self.prune(now)
             episode = self.current.pop(code + ":" + (task_id or ""), None)
             if episode is not None:
                 episode["resolved_at"] = now
@@ -46,14 +64,33 @@ class CriticalAlerts:
 
     def active(self) -> list[dict[str, Any]]:
         with self.lock:
+            with self.store.connection() as db:
+                live = {
+                    row[0]
+                    for row in db.execute(
+                        "SELECT task_id FROM task_retention WHERE expires > ?",
+                        (self.store.clock(),),
+                    )
+                }
+            self.prune(self.store.clock(), live)
             return [dict(episode) for episode in self.current.values()]
 
     def flush(self) -> None:
         with self.lock:
+            self.prune(self.store.clock())
             if not self.pending:
                 return
             try:
                 with self.store.connection() as db:
+                    db.execute("BEGIN IMMEDIATE")
+                    live = {
+                        row[0]
+                        for row in db.execute(
+                            "SELECT task_id FROM task_retention WHERE expires > ?",
+                            (self.store.clock(),),
+                        )
+                    }
+                    self.prune(self.store.clock(), live)
                     db.executemany(
                         "INSERT INTO core_alerts VALUES "
                         "(:id,:at,:code,:task_id,:resolved_at) "

@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import Field
 
 from .contracts import Event
+from .storage import file_gate, text_expired
 from .telemetry import Journal
 
 logger = logging.getLogger("ai_sentinel_telemetry")
@@ -66,10 +67,14 @@ def create_delivery_app(journal: Journal, send: Sender) -> FastAPI:
     ) -> dict[str, Any]:
         receipts = []
         try:
-            for event in events:
-                receipt = send(event.model_dump(mode="json", exclude_none=True))
-                journal.acknowledge(str(event.event_id), receipt["task_id"])
-                receipts.append(receipt)
+            with file_gate(journal.database.parent / "buffer"):
+                for event in events:
+                    payload = event.model_dump(mode="json", exclude_none=True)
+                    if text_expired(payload, journal.clock()):
+                        raise HTTPException(410, "Buffered source expired")
+                    receipt = send(payload)
+                    journal.acknowledge(str(event.event_id), receipt["task_id"])
+                    receipts.append(receipt)
         except (OSError, URLError, sqlite3.Error, ValueError, KeyError) as error:
             logger.warning(
                 "core_delivery_unavailable reason=%s status=%s retry_pending=true",
