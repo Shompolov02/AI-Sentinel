@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import struct
+import time
 from pathlib import Path
 
 from .compressed_retention import clean_compressed, recover_directory
@@ -21,6 +23,36 @@ def clean_auxiliary(
     *,
     tty_directory: Path | None = None,
 ) -> None:
+    positions: dict[str, int] = {}
+    limits: dict[str, int] = {}
+    archives: set[Path] = set()
+    while _clean_auxiliary_batch(
+        journal,
+        logs,
+        downloads,
+        now,
+        tty_directory=tty_directory,
+        positions=positions,
+        limits=limits,
+        archives=archives,
+    ):
+        # Release the registry between bounded batches so collector admission,
+        # delivery and health can proceed during a large native TTY cleanup.
+        time.sleep(0.01)
+
+
+def _clean_auxiliary_batch(
+    journal: Journal,
+    logs: Path,
+    downloads: Path | None,
+    now: float,
+    *,
+    tty_directory: Path | None,
+    positions: dict[str, int],
+    limits: dict[str, int],
+    archives: set[Path],
+) -> bool:
+    scanned = 0
     with journal.connection() as db:
         db.executescript("""
             CREATE TABLE IF NOT EXISTS auxiliary_ranges (
@@ -55,6 +87,8 @@ def clean_auxiliary(
             if path.is_symlink() or not path.is_file():
                 raise OSError("Auxiliary source is not a regular file")
             if path.suffix == ".gz" and kind != "artifact":
+                if path in archives:
+                    continue
                 base = path.name[:-3]
                 names = [
                     session
@@ -95,11 +129,15 @@ def clean_auxiliary(
                     line_receipt=line_receipt if kind == "line" else None,
                     connection=db,
                 )
+                archives.add(path)
                 continue
             fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
             try:
                 stat = os.fstat(fd)
                 identity = f"{stat.st_dev}:{stat.st_ino}"
+                file_size = limits.setdefault(identity, stat.st_size)
+                if stat.st_size < file_size:
+                    raise OSError("Auxiliary source truncated during cleanup")
                 bound = db.execute(
                     "SELECT received FROM auxiliary_bindings WHERE identity=?",
                     (identity,),
@@ -128,8 +166,16 @@ def clean_auxiliary(
                     )
                 else:
                     file_receipt = bound[0]
-                position = 0
-                while position < stat.st_size:
+                pending: list[tuple[int, int]] = []
+
+                position = positions.get(identity, 0)
+                while position < file_size:
+                    if scanned >= 64:
+                        _flush_ranges(db, fd, identity, pending)
+                        db.commit()
+                        positions[identity] = position
+                        return True
+                    scanned += 1
                     if kind == "tty":
                         raw_header = os.pread(fd, HEADER.size, position)
                         if len(raw_header) != HEADER.size:
@@ -139,12 +185,12 @@ def clean_auxiliary(
                         )
                         if op not in (1, 2, 3, 4) or length < 0:
                             raise OSError("Invalid TTY frame")
-                        if position + HEADER.size + length > stat.st_size:
+                        if position + HEADER.size + length > file_size:
                             # Slow writes cannot extend an expired session;
                             # preserve its header and append position.
                             if file_receipt is None or file_receipt + TEXT_TTL <= now:
                                 db.commit()
-                                available = stat.st_size - position - HEADER.size
+                                available = file_size - position - HEADER.size
                                 erase_payload(fd, position + HEADER.size, available)
                             break
                         start = position + HEADER.size
@@ -153,7 +199,7 @@ def clean_auxiliary(
                         position = start + length
                     else:
                         start = position
-                        limit = min(MAX_LINE, stat.st_size - start)
+                        limit = min(MAX_LINE, file_size - start)
                         if kind == "artifact":
                             previous = db.execute(
                                 "SELECT length FROM auxiliary_ranges "
@@ -161,7 +207,7 @@ def clean_auxiliary(
                                 (identity, start),
                             ).fetchone()
                             if previous:
-                                if previous[0] > stat.st_size - start:
+                                if previous[0] > file_size - start:
                                     raise OSError("Captured artifact was truncated")
                                 limit = previous[0]
                         data = os.pread(fd, limit, start)
@@ -169,9 +215,9 @@ def clean_auxiliary(
                         if kind == "line":
                             first_block = data
                             block = data
-                            while b"\n" not in block and position < stat.st_size:
+                            while b"\n" not in block and position < file_size:
                                 block = os.pread(
-                                    fd, min(MAX_LINE, stat.st_size - position), position
+                                    fd, min(MAX_LINE, file_size - position), position
                                 )
                                 if not block:
                                     break
@@ -224,20 +270,35 @@ def clean_auxiliary(
                             "WHERE identity=? AND position=?",
                             (identity, start),
                         )
-                        db.commit()
-                        erase_payload(fd, start, range_length)
-                        db.execute(
-                            "UPDATE auxiliary_ranges SET state='erased' "
-                            "WHERE identity=? AND position=?",
-                            (identity, start),
-                        )
+                        pending.append((start, range_length))
+                _flush_ranges(db, fd, identity, pending)
                 db.commit()
+                positions[identity] = file_size
             finally:
                 os.close(fd)
         db.execute("INSERT OR IGNORE INTO auxiliary_meta VALUES (1)")
+    return False
 
 
-def erase_payload(fd: int, position: int, length: int) -> None:
+def _flush_ranges(
+    db: sqlite3.Connection, fd: int, identity: str, pending: list[tuple[int, int]]
+) -> None:
+    if not pending:
+        return
+    # All range intents become durable before any bytes change.
+    db.commit()
+    for start, length in pending:
+        erase_payload(fd, start, length, sync=False)
+    os.fsync(fd)
+    db.executemany(
+        "UPDATE auxiliary_ranges SET state='erased' WHERE identity=? AND position=?",
+        [(identity, start) for start, _ in pending],
+    )
+    db.commit()
+    pending.clear()
+
+
+def erase_payload(fd: int, position: int, length: int, *, sync: bool = True) -> None:
     end = position + length
     while position < end:
         size = min(MAX_LINE, end - position)
@@ -253,4 +314,5 @@ def erase_payload(fd: int, position: int, length: int) -> None:
                 raise OSError("Incomplete auxiliary cleanup")
             written += count
         position += size
-    os.fsync(fd)
+    if sync:
+        os.fsync(fd)

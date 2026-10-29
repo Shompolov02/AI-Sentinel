@@ -227,15 +227,23 @@ def test_committed_queue_recovers_after_restart_and_rejects_over_capacity(
     # and bounded even when the worker has not started yet.
     client = TestClient(create_app(settings))
     first = client.post("/internal/events", json=EVENT, headers=AUTH).json()["task_id"]
-    for _ in range(999):
+    for index in range(999):
         accepted = client.post(
             "/internal/events", json={**EVENT, "event_id": str(uuid4())}, headers=AUTH
         )
         assert accepted.status_code == 202
+        if index == 798:
+            assert accepted.headers["X-Core-Queue-Depth"] == "800"
     blocked = client.post(
         "/internal/events", json={**EVENT, "event_id": str(uuid4())}, headers=AUTH
     )
     assert blocked.status_code == 503
+    assert blocked.headers["X-Core-Queue-Depth"] == "1000"
+    assert (
+        client.head("/internal/events", headers=AUTH).headers["X-Core-Queue-Depth"]
+        == "1000"
+    )
+    assert client.head("/internal/events").status_code == 401
     assert (
         client.post("/internal/events", json=EVENT, headers=AUTH).json()["task_id"]
         == first
@@ -246,6 +254,22 @@ def test_committed_queue_recovers_after_restart_and_rejects_over_capacity(
         task = recovered.get(f"/api/tasks/{first}").json()
         assert task["state"] == "completed"
         assert task["verdict"]["severity"] == "Low"
+        depth = int(
+            recovered.head("/internal/events", headers=AUTH).headers[
+                "X-Core-Queue-Depth"
+            ]
+        )
+        assert 0 <= depth < 1000
+        # Capacity is available again; no throughput SLO for draining all 1000
+        # tasks is implied by this admission/restart contract.
+        assert (
+            recovered.post(
+                "/internal/events",
+                json={**EVENT, "event_id": str(uuid4())},
+                headers=AUTH,
+            ).status_code
+            == 202
+        )
 
 
 def test_collector_token_rotation_accepts_overlap_then_revokes_old_token(

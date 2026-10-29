@@ -1021,12 +1021,36 @@ def _verify_commands(compose: Any, telnet_port: int, url: str) -> None:
                 if event["event_type"] != "command":
                     continue
                 text = event["command"]["text"]
-                if text in commands and task["state"] in ("completed", "failed"):
+                if (
+                    text in commands
+                    and task["state"] in ("completed", "failed")
+                    and all(
+                        evidence["source_status"] == "available"
+                        for evidence in task["evidence"]
+                    )
+                ):
                     observed[text] = task
             if set(observed) == set(commands):
                 break
             time.sleep(1)
         assert set(observed) == set(commands), observed
+
+        def readable_task(task_id: str) -> dict[str, Any]:
+            # Source reachability is a live observation, not persisted analysis.
+            # Compare complete snapshots only once reader availability agrees.
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                response = client.get(f"/api/tasks/{task_id}")
+                assert response.status_code in (200, 503), response.text
+                if response.status_code == 200:
+                    result: dict[str, Any] = response.json()
+                    statuses = {e["source_status"] for e in result["evidence"]}
+                    assert statuses <= {"available", "unavailable"}, result
+                    if statuses == {"available"}:
+                        return result
+                time.sleep(1)
+            raise AssertionError("Command source did not become available")
+
         for text, (state, guard_status) in commands.items():
             task = observed[text]
             assert task["state"] == state, task
@@ -1056,10 +1080,10 @@ def _verify_commands(compose: Any, telnet_port: int, url: str) -> None:
                 "print(urlopen(request).status)",
             )
             assert replay.returncode == 0, replay.stderr
-            assert client.get(f"/api/tasks/{task['task_id']}").json() == task
+            assert readable_task(task["task_id"]) == task
         recreated = compose(
             "up", "-d", "--no-deps", "--force-recreate", "--wait", "core", timeout=90
         )
         assert recreated.returncode == 0, recreated.stderr
         for task in observed.values():
-            assert client.get(f"/api/tasks/{task['task_id']}").json() == task
+            assert readable_task(task["task_id"]) == task

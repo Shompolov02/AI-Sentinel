@@ -216,7 +216,7 @@ def create_app(settings: Settings) -> FastAPI:
     @app.post(
         "/internal/events", status_code=202, dependencies=[Depends(require_collector)]
     )
-    async def receive(payload: Event) -> dict[str, str]:
+    async def receive(payload: Event, response: Response) -> dict[str, str]:
         try:
             result = store.accept(
                 json.dumps(
@@ -229,10 +229,16 @@ def create_app(settings: Settings) -> FastAPI:
             if error.status_code == 503:
                 critical.raise_alert("intake_capacity_reached", settings.clock())
                 critical.flush()
+                error.headers = {"X-Core-Queue-Depth": "1000"}
             raise
+        response.headers["X-Core-Queue-Depth"] = str(store.intake_depth())
         if result["state"] in ("queued", "processing"):
             schedule(result["task_id"])
         return result
+
+    @app.head("/internal/events", dependencies=[Depends(require_collector)])
+    def intake_capacity() -> Response:
+        return Response(headers={"X-Core-Queue-Depth": str(store.intake_depth())})
 
     @app.get("/health")
     def health() -> dict[str, str]:

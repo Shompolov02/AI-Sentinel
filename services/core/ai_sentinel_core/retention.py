@@ -11,7 +11,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from .aux_retention import clean_auxiliary
-from .buffer_retention import maintain_collector
+from .buffer_retention import buffer_owner, maintain_collector
 from .raw_retention import clean_raw
 from .store import Store
 from .telemetry import Journal
@@ -39,7 +39,12 @@ def main(
                 journal = Journal(database, os.environ["COWRIE_SENSOR_ID"], clock=clock)
                 if args.role == "raw":
                     logs = Path(os.environ.get("COWRIE_LOG_DIR", "/cowrie-logs"))
-                    journal.scan(logs)
+                    # The live collector owns admission, including its pause
+                    # and slow polling. Raw maintenance must not become a
+                    # second input adapter that bypasses backpressure.
+                    with buffer_owner(database.parent) as owns_input:
+                        if owns_input:
+                            journal.scan(logs)
                     clean_auxiliary(
                         journal,
                         logs,

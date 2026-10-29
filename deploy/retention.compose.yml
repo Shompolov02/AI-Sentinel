@@ -31,6 +31,7 @@ services:
     environment:
       COWRIE_STORAGE_GROUP: "999"
       COWRIE_SENSOR_ID: ${COWRIE_SENSOR_ID:?Set COWRIE_SENSOR_ID}
+      COLLECTOR_OUTBOX_BYTES: ${COLLECTOR_OUTBOX_BYTES:-67108864}
       COLLECTOR_DB_PATH: /data/collector.db
       COWRIE_LOG_DIR: /cowrie-logs
       COWRIE_TTY_DIR: /cowrie-tty

@@ -17,10 +17,21 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 from pydantic import BaseModel, IPvAnyAddress, ValidationError
 
 from .contracts import Event, Port, Text
-from .storage import METADATA_TTL, connect, file_gate, share_storage, text_expired
+from .storage import (
+    METADATA_TTL,
+    TEXT_TTL,
+    connect,
+    file_gate,
+    share_storage,
+    text_expired,
+)
 
 logger = logging.getLogger("ai_sentinel_telemetry")
 MAX_LINE = 65536
+
+
+class BufferFull(Exception):
+    """Leave the source cursor before the event that cannot fit."""
 
 
 class Connection(BaseModel):
@@ -37,6 +48,9 @@ class Journal:
     ) -> None:
         self.database = database
         self.sensor = sensor
+        self.outbox_limit = int(os.environ.get("COLLECTOR_OUTBOX_BYTES", 64 * 1024**2))
+        if self.outbox_limit < 1024:
+            raise ValueError("Collector outbox budget must be at least 1024 bytes")
         self.shared_group = (
             int(os.environ["COWRIE_STORAGE_GROUP"])
             if os.environ.get("COWRIE_STORAGE_GROUP")
@@ -63,6 +77,15 @@ class Journal:
         with self.connection() as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS sensor (id TEXT PRIMARY KEY);
+                CREATE TABLE IF NOT EXISTS collector_pressure (
+                    name TEXT PRIMARY KEY, value INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS buffer_deadlines (
+                    id TEXT PRIMARY KEY, expires REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS buffer_expiry_notices (
+                    id TEXT PRIMARY KEY
+                );
                 CREATE TABLE IF NOT EXISTS files (
                     identity TEXT PRIMARY KEY, generation TEXT NOT NULL,
                     path TEXT NOT NULL, offset INTEGER NOT NULL
@@ -166,6 +189,29 @@ class Journal:
                         else self.clock(),
                     ),
                 )
+            for row in db.execute(
+                "SELECT id,payload FROM outbox WHERE payload != '{}'"
+            ).fetchall():
+                received = datetime.fromisoformat(
+                    json.loads(row["payload"])["received_at"].replace("Z", "+00:00")
+                ).timestamp()
+                db.execute(
+                    "INSERT OR IGNORE INTO buffer_deadlines VALUES (?,?)",
+                    (row["id"], received + TEXT_TTL),
+                )
+                event = json.loads(row["payload"])
+                # Release old acknowledged payloads on upgrade only after their
+                # source receipt is registered. Cursor-only legacy volumes must
+                # first recover that receipt from the retained payload in scan().
+                if db.execute(
+                    "SELECT 1 FROM source_ranges WHERE reference=?",
+                    (event["raw_record_ref"],),
+                ).fetchone():
+                    db.execute(
+                        "UPDATE outbox SET payload='{}' WHERE id=? "
+                        "AND task_id IS NOT NULL",
+                        (row["id"],),
+                    )
         if scrub:
             with self.connection() as db:
                 db.execute("VACUUM")
@@ -345,8 +391,32 @@ class Journal:
                                 hashlib.sha256(raw).hexdigest(),
                             ),
                         )
-                        self.record(db, generation, start, raw)
+                        try:
+                            self.record(db, generation, start, raw)
+                        except BufferFull:
+                            db.execute(
+                                "INSERT OR REPLACE INTO collector_pressure VALUES "
+                                "('outbox_blocked',1)"
+                            )
+                            db.execute(
+                                "INSERT OR REPLACE INTO files VALUES (?,?,?,?)",
+                                (identity, generation, path.name, offset),
+                            )
+                            db.execute(
+                                "INSERT OR IGNORE INTO retention_files VALUES (?)",
+                                (generation,),
+                            )
+                            return
                     offset = stream.tell()
+                    if (
+                        db.execute(
+                            "SELECT coalesce(sum(length(CAST(payload AS BLOB))),0) "
+                            "FROM outbox WHERE payload != '{}'"
+                        ).fetchone()[0]
+                        * 100
+                        >= self.outbox_limit * 80
+                    ):
+                        break
                 db.execute(
                     "INSERT OR REPLACE INTO files VALUES (?,?,?,?)",
                     (identity, generation, path.name, offset),
@@ -354,6 +424,15 @@ class Journal:
                 db.execute(
                     "INSERT OR IGNORE INTO retention_files VALUES (?)", (generation,)
                 )
+                if (
+                    db.execute(
+                        "SELECT coalesce(sum(length(CAST(payload AS BLOB))),0) "
+                        "FROM outbox WHERE payload != '{}'"
+                    ).fetchone()[0]
+                    * 100
+                    >= self.outbox_limit * 80
+                ):
+                    return
 
     def record(
         self, db: sqlite3.Connection, generation: str, offset: int, raw: bytes
@@ -450,6 +529,18 @@ class Journal:
             payload = event.model_dump_json(exclude_none=True)
             if len(payload.encode()) > MAX_LINE:
                 raise ValueError("Normalized record exceeds intake limit")
+            if (
+                db.execute(
+                    "SELECT 1 FROM outbox WHERE id=?", (str(event.event_id),)
+                ).fetchone()
+                is None
+            ):
+                used = db.execute(
+                    "SELECT coalesce(sum(length(CAST(payload AS BLOB))),0) "
+                    "FROM outbox WHERE payload != '{}'"
+                ).fetchone()[0]
+                if used + len(payload.encode()) > self.outbox_limit:
+                    raise BufferFull
             db.execute(
                 "INSERT OR IGNORE INTO outbox VALUES (?,?,NULL)",
                 (str(event.event_id), payload),
@@ -457,6 +548,10 @@ class Journal:
             db.execute(
                 "INSERT OR IGNORE INTO delivery_retention VALUES (?,?)",
                 (str(event.event_id), event.received_at.timestamp() + METADATA_TTL),
+            )
+            db.execute(
+                "INSERT OR IGNORE INTO buffer_deadlines VALUES (?,?)",
+                (str(event.event_id), event.received_at.timestamp() + TEXT_TTL),
             )
         except (ValueError, KeyError, TypeError, ValidationError, RecursionError):
             self.quarantine(db, generation, offset, raw, "invalid_record")
@@ -510,12 +605,28 @@ class Journal:
                     )
                     expired += 1
                     if row["task_id"] is None:
-                        logger.critical("buffer_event_expired event_id=%s", row["id"])
-            if expired:
+                        db.execute(
+                            "INSERT OR IGNORE INTO buffer_expiry_notices VALUES (?)",
+                            (row["id"],),
+                        )
+            due_chunks = db.execute(
+                "SELECT 1 FROM buffer_deadlines WHERE expires <= ? LIMIT 1", (now,)
+            ).fetchone()
+            if expired or due_chunks:
                 db.execute(
                     "INSERT INTO buffer_retention VALUES (1,?) "
                     "ON CONFLICT(id) DO UPDATE SET cutoff=max(cutoff,excluded.cutoff)",
                     (now,),
+                )
+                db.execute("DELETE FROM buffer_deadlines WHERE expires <= ?", (now,))
+        # Publish only after the payload deletion commits. The durable notice
+        # survives interruption before logging; interruption after logging may
+        # repeat a safe ID, but cannot silently forget the loss notification.
+        with self.connection() as db:
+            for notice in db.execute("SELECT id FROM buffer_expiry_notices").fetchall():
+                logger.critical("buffer_event_expired event_id=%s", notice["id"])
+                db.execute(
+                    "DELETE FROM buffer_expiry_notices WHERE id=?", (notice["id"],)
                 )
         return expired
 
@@ -544,8 +655,43 @@ class Journal:
     def acknowledge(self, event_id: str, task_id: str) -> None:
         with self.connection() as db:
             db.execute(
-                "UPDATE outbox SET task_id = ? WHERE id = ?", (task_id, event_id)
+                "UPDATE outbox SET task_id = ?, payload = '{}' WHERE id = ?",
+                (task_id, event_id),
             )
+
+    def buffer_usage(self) -> int:
+        with self.connection() as db:
+            return int(
+                db.execute(
+                    "SELECT coalesce(sum(length(CAST(payload AS BLOB))),0) "
+                    "FROM outbox WHERE payload != '{}'"
+                ).fetchone()[0]
+            )
+
+    def pressure_value(self, name: str, value: int | None = None) -> int:
+        with self.connection() as db:
+            if value is not None:
+                db.execute(
+                    "INSERT OR REPLACE INTO collector_pressure VALUES (?,?)",
+                    (name, value),
+                )
+            row = db.execute(
+                "SELECT value FROM collector_pressure WHERE name=?", (name,)
+            ).fetchone()
+            return int(row[0]) if row else 0
+
+    def awaiting(self, ids: set[str]) -> set[str]:
+        with self.connection() as db:
+            return {
+                key
+                for key in ids
+                if db.execute(
+                    "SELECT 1 FROM outbox WHERE id=? AND task_id IS NULL "
+                    "AND payload != '{}'",
+                    (key,),
+                ).fetchone()
+                is not None
+            }
 
     def status(self) -> dict[str, Any]:
         with self.connection() as db:
