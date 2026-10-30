@@ -359,11 +359,13 @@ class Store:
             ]
 
     def intake_full(self) -> bool:
+        return self.intake_depth() >= 1000
+
+    def intake_depth(self) -> int:
         with self.connection() as db:
-            return bool(
+            return int(
                 db.execute(
-                    "SELECT count(*) >= 1000 FROM tasks "
-                    "WHERE state IN ('queued','processing')"
+                    "SELECT count(*) FROM tasks WHERE state IN ('queued','processing')"
                 ).fetchone()[0]
             )
 

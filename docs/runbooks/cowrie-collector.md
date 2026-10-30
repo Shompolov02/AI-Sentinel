@@ -32,6 +32,72 @@ chunks. HTTP output направлен в адаптер на loopback того 
 файла. Только durable 202 от Core подтверждает outbox. Повтор после сбоя
 сохраняет event_id, время первого приёма и task_id.
 
+## Ограничение накопления (#52)
+
+`COLLECTOR_OUTBOX_BYTES=67108864` ограничивает payload outbox;
+`COLLECTOR_CHUNK_BYTES=67108864` — отдельный бюджет chunks. Размер самой SQLite,
+её журналов и метаданных больше payload. Правила резерва диска, пороги 80/100/60
+и технические ограничения — [контракт буфера](../spec/collector-buffer-v1.md).
+При предупреждении чтение переходит с периода 2 на 10 секунд; при остановке
+collector сохраняет позицию перед непринятой записью, продолжает доставку и
+очистку. Cowrie продолжает писать исходный журнал, поэтому нужно следить также
+за местом его тома. Лимит chunks учитывает запас перед подачей следующего пакета.
+
+Диагностика в существующем Compose project с прежними переменными окружения:
+
+```sh
+docker compose -f deploy/docker-compose.yml -f deploy/core.compose.yml -f deploy/collector.compose.yml logs --tail 50 collector
+docker compose -f deploy/docker-compose.yml -f deploy/core.compose.yml -f deploy/collector.compose.yml exec -T collector python -c 'from urllib.request import urlopen; print(urlopen("http://127.0.0.1:8090/health", timeout=3).read().decode())'
+```
+
+Ищите `collector_backpressure`, `collector_intake_stopped`,
+`collector_intake_resumed`, а также `core_delivery_unavailable`.
+Через 14 дней недоставленная запись даёт локальный CRITICAL
+`buffer_event_expired` с event_id, без отдельной задачи или тревоги на странице.
+Сигнал публикуется после commit удаления payload. Сбой между записью журнала
+и подтверждением может повторить сигнал с тем же event_id после перезапуска.
+При физическом отказе chunks ожидается CRITICAL `retention_cleanup_failed`;
+восстановите доступ/место и повторите запуск. Отсутствие payload или сигнал об
+истечении ещё не доказывают завершение физической очистки chunks.
+`intake=stopped` при `status=ok` означает работающий, но ограничивший чтение
+collector. Счётчики не содержат текст команд. Восстановите Core или освободите
+место штатной очисткой; не удаляйте outbox, chunks или реестр вручную.
+После снижения всех показателей до 60% или ниже чтение возобновится.
+Retention overlay получает тот же бюджет outbox. Raw-очиститель уступает
+нормализацию живому collector через общий lease, иначе обошёл бы паузу/замедление.
+При обновлении пересоздайте также retention; collector сам настроит lease
+для группы 999 (0660). Расширять права chunks/Core или вручную удалять lock не нужно.
+При обновлении нужно пересоздать также core-intake, чтобы разрешить новый
+авторизованный HEAD через прежний TLS ingress. Страница Core его не публикует.
+
+Отдельная проверка AC1 на собственном контейнере и временных файловых системах:
+
+```sh
+uv run pytest -q -m runtime tests/integration/test_buffer_pressure_runtime.py
+```
+
+Harness собирает collector; `AI_SENTINEL_RUNTIME_REUSE_IMAGES=1` допустим только
+для заведомо актуального образа. Это проверка collector/Fluent Bit с управляемым
+Core-транспортом; сквозная приёмка настоящего Cowrie/TLS выполняется отдельно.
+Сценарии `expiry` и `expiry_fault` добавляют реальный Core HTTP, заполненный
+буфер, управляемое время, открытый inode и отказ очистки с перезапуском.
+Текущие исходники Core/collector подключаются в harness read-only; повторное
+использование образа требует прежних зависимостей и версии Fluent Bit.
+
+Сквозной сценарий #52 с настоящими Cowrie SSH/Telnet, TLS, reader и raw-очисткой:
+
+```sh
+uv run pytest -q -m runtime tests/integration/test_buffer_stack_runtime.py
+```
+
+Он создаёт свой Compose project, credentials, loopback-порты и тома; удаляет
+только их. Проверяет бюджет 10 000 байт, остановку/восстановление, перезапуск,
+границы 14 дней, отсутствие задач/веб-тревог для истёкшего и DNS/IP-изоляцию
+Cowrie. HEAD проверяется через настоящий TLS с токеном и отрицательными
+проверками CA/авторизации. Guard/внешняя LLM для проверки буфера не нужны:
+команды без модели честно получают `guard_unavailable`; отдельная обязательная
+ML-приёмка из runbook Guard этим тестом не заменяется.
+
 ## Ручная проверка
 
 Используйте синтетического пользователя и лабораторный пароль, вводимый
@@ -85,7 +151,7 @@ Collector использует последний непустой токен о
 проверьте доставку и отзовите старый по Core runbook. При смене CA обновите
 trust bundle до смены server certificate и пересоздайте collector для перечитывания
 TLS context. CA private key никогда не монтируется. Retention и политика
-истечения буфера описаны в runbook #51; размеры/перегрузка остаются #52.
+истечения буфера описаны в runbook #51; размеры и перегрузка — в разделе #52 выше.
 Проверяйте место на диске стенда.
 
 ## Автоматизированная приёмка

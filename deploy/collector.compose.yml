@@ -18,6 +18,8 @@ services:
     environment:
       COWRIE_STORAGE_GROUP: "999"
       COWRIE_SENSOR_ID: ${COWRIE_SENSOR_ID:?Set COWRIE_SENSOR_ID}
+      COLLECTOR_OUTBOX_BYTES: ${COLLECTOR_OUTBOX_BYTES:-67108864}
+      COLLECTOR_CHUNK_BYTES: ${COLLECTOR_CHUNK_BYTES:-67108864}
     volumes:
       - cowrie-logs:/cowrie-logs:ro
       - collector-data:/data

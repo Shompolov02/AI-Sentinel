@@ -10,10 +10,28 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from .storage import share_storage
 from .telemetry import Journal
 
 _owners: set[Path] = set()
 _owner_guard = threading.RLock()
+_buffer_gate = threading.RLock()
+
+
+@contextmanager
+def buffer_gate(directory: Path) -> Iterator[None]:
+    """Serialize delivery/reset without holding the SQLite process-wide gate.
+
+    The network call can take five seconds. Health, admission and disk checks
+    must still read their database while that delivery is waiting on TLS.
+    """
+    with _buffer_gate:
+        with (directory / "buffer.retention.lock").open("a+b") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(stream, fcntl.LOCK_UN)
 
 
 @contextmanager
@@ -28,6 +46,10 @@ def buffer_owner(directory: Path, *, wait: bool = False) -> Iterator[bool]:
         return
     try:
         with (directory / "fluent-owner.lock").open("a+b") as stream:
+            if os.environ.get("COWRIE_STORAGE_GROUP"):
+                share_storage(
+                    Path(stream.name), int(os.environ["COWRIE_STORAGE_GROUP"])
+                )
             acquired = False
             try:
                 try:

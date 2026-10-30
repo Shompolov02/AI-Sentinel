@@ -1,6 +1,7 @@
 """Test-only shared clock; mounted read-only, never exposed by production HTTP."""
 
 import asyncio
+import logging
 import os
 import sys
 from pathlib import Path
@@ -19,6 +20,7 @@ def clock() -> float:
 
 role = sys.argv[1]
 if role == "collector":
+    logging.basicConfig(level=logging.INFO)
     asyncio.run(run(clock=clock))
 elif role == "retention":
     raise SystemExit(main(["--role", "raw"], clock=clock))
@@ -47,7 +49,9 @@ else:
             Path(os.environ["CORE_TOKENS_FILE"]),
             Path(os.environ["CORE_PASSWORD_HASH_FILE"]),
             clock=clock,
-            guard_model=Path(os.environ["CORE_GUARD_MODEL_DIR"]),
+            guard_model=Path(os.environ["CORE_GUARD_MODEL_DIR"])
+            if os.environ.get("CORE_GUARD_MODEL_DIR")
+            else None,
             source_reader=tls_reader(
                 Path(os.environ["CORE_RAW_READER_TOKENS_FILE"]),
                 Path(os.environ["CORE_RAW_READER_CA_FILE"]),

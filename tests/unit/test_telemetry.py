@@ -176,6 +176,49 @@ def test_fluent_bit_batch_is_acknowledged_only_after_core_acceptance(
             )
 
 
+def test_lost_core_receipt_replays_the_same_task_without_duplicate_audit(
+    tmp_path: Path,
+) -> None:
+    from urllib.error import URLError
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "cowrie.json").write_text(
+        json.dumps(CONNECT) + "\n" + json.dumps(LOGIN) + "\n"
+    )
+    journal = Journal(tmp_path / "collector.db", "lost-receipt")
+    journal.scan(logs)
+    events = journal.pending()
+    core = TestClient(create_app(configured(tmp_path)))
+    lose_reply = True
+    task_id = ""
+
+    def send(event: dict[str, object]) -> dict[str, str]:
+        nonlocal lose_reply, task_id
+        accepted = core.post("/internal/events", json=event, headers=AUTH)
+        assert accepted.status_code == 202
+        task_id = accepted.json()["task_id"]
+        if lose_reply:
+            lose_reply = False
+            raise URLError("synthetic lost response after commit")
+        return cast(dict[str, str], accepted.json())
+
+    try:
+        with TestClient(create_delivery_app(journal, send)) as delivery:
+            assert delivery.post("/deliver", json=events).status_code == 503
+            assert journal.pending() == events
+            core.post("/login", json={"password": "synthetic-test-password"})
+            saved_id = task_id
+            before = core.get(f"/api/tasks/{saved_id}").json()
+            repeated = delivery.post("/deliver", json=events)
+            assert repeated.status_code == 200
+            assert repeated.json()["receipts"][0]["task_id"] == saved_id
+            assert core.get(f"/api/tasks/{saved_id}").json() == before
+            assert journal.pending() == []
+    finally:
+        core.close()
+
+
 def test_invalid_session_shape_is_quarantined_without_stopping_collection(
     tmp_path: Path,
 ) -> None:

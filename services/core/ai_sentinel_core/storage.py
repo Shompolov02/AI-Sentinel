@@ -15,7 +15,7 @@ from typing import Any
 
 TEXT_TTL = 14 * 86400
 METADATA_TTL = 30 * 86400
-_gate = threading.RLock()
+state_gate = threading.RLock()
 
 
 def share_storage(path: Path, group: int, *, directory: bool = False) -> None:
@@ -35,7 +35,7 @@ def file_gate(
     path: Path, *, readonly: bool = False, group: int | None = None
 ) -> Iterator[None]:
     """Coordinate filesystem erasure with normalizer and reader snapshots."""
-    with _gate:
+    with state_gate:
         with Path(str(path) + ".retention.lock").open(
             "rb" if readonly else "a+b"
         ) as lock:

@@ -9,7 +9,7 @@ import time
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.error import HTTPError
 
 import pytest
@@ -184,6 +184,90 @@ def test_collector_erases_expired_outbox_and_keeps_fresh_delivery(
     assert events[0]["command"]["text"] not in caplog.text
     for file in tmp_path.glob("collector.db*"):
         assert events[0]["command"]["text"].encode() not in file.read_bytes()
+
+
+def test_failed_expiry_commit_preserves_payload_without_reporting_buffer_loss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import sqlite3
+
+    from ai_sentinel_core.retention import main
+
+    clock = [1792404000.0]
+    journal, events = captured_commands(tmp_path, clock, monkeypatch)
+    monkeypatch.setenv("COLLECTOR_DB_PATH", str(journal.database))
+    monkeypatch.setenv("COWRIE_SENSOR_ID", journal.sensor)
+    marker = events[0]["command"]["text"].encode()
+    clock[0] = 1793613600.0
+    original_connect = sqlite3.connect
+
+    class FailedCommit(sqlite3.Connection):
+        def __exit__(self, *args: Any) -> Literal[False]:
+            # External database failure: reads still work, a commit that
+            # mutated data fails and rolls back instead of becoming durable.
+            if self.in_transaction and self.total_changes:
+                self.rollback()
+                raise sqlite3.OperationalError("synthetic commit failure")
+            return super().__exit__(*args)
+
+    with monkeypatch.context() as failure:
+
+        def connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+            return original_connect(*args, **kwargs, factory=FailedCommit)
+
+        failure.setattr(sqlite3, "connect", connect)
+        assert main(["--role", "collector", "--once"], clock=lambda: clock[0]) == 1
+    assert marker in journal.database.read_bytes()
+    assert "retention_cleanup_failed" in caplog.text
+    assert "buffer_event_expired" not in caplog.text
+    caplog.clear()
+    assert main(["--role", "collector", "--once"], clock=lambda: clock[0]) == 0
+    assert marker not in journal.database.read_bytes()
+    assert (
+        sum("buffer_event_expired" in record.message for record in caplog.records) == 1
+    )
+
+
+def test_expiry_notice_survives_failed_log_write_and_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    from ai_sentinel_core.retention import main
+
+    clock = [1792404000.0]
+    journal, events = captured_commands(tmp_path, clock, monkeypatch)
+    monkeypatch.setenv("COLLECTOR_DB_PATH", str(journal.database))
+    monkeypatch.setenv("COWRIE_SENSOR_ID", journal.sensor)
+    clock[0] = 1793613600.0
+
+    class UnavailableLog(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            if "buffer_event_expired" in record.getMessage():
+                raise OSError("synthetic local log unavailable")
+
+    handler = UnavailableLog()
+    logger = logging.getLogger("ai_sentinel_telemetry")
+    logger.addHandler(handler)
+    try:
+        assert main(["--role", "collector", "--once"], clock=lambda: clock[0]) == 1
+    finally:
+        logger.removeHandler(handler)
+    assert events[0]["command"]["text"].encode() not in journal.database.read_bytes()
+    assert events[1]["command"]["text"].encode() in journal.database.read_bytes()
+    assert "retention_cleanup_failed" in caplog.text
+    caplog.clear()
+    # The CLI opens a fresh Journal; no in-memory notification state is reused.
+    assert main(["--role", "collector", "--once"], clock=lambda: clock[0]) == 0
+    notices = [
+        record for record in caplog.records if "buffer_event_expired" in record.message
+    ]
+    assert len(notices) == 1
+    assert notices[0].levelname == "CRITICAL"
+    assert events[0]["event_id"] in notices[0].message
+    caplog.clear()
+    assert main(["--role", "collector", "--once"], clock=lambda: clock[0]) == 0
+    assert "buffer_event_expired" not in caplog.text
 
 
 def test_raw_cleanup_preserves_fresh_offsets_and_an_open_cowrie_writer(
@@ -567,6 +651,69 @@ def test_new_session_and_renamed_tty_keep_their_own_auxiliary_deadline(
     assert events[0]["command"]["text"] not in service.read_text()
     assert "new-session-copy-marker" in service.read_text()
     assert payload in (tty / "opaque-transcript-hash").read_bytes()
+
+
+@pytest.mark.parametrize("phase", ["write", "sync"])
+def test_native_tty_cleanup_recovers_partial_batch_without_losing_fresh_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    import os
+
+    from ai_sentinel_core.retention import main
+
+    clock = [1792404000.0]
+    journal, _ = captured_commands(tmp_path, clock, monkeypatch)
+    logs = tmp_path / "logs"
+    with (logs / "cowrie.json").open("a") as stream:
+        stream.write(json.dumps({**CONNECT, "session": "session-2"}) + "\n")
+    journal.scan(logs)
+    tty = logs / "tty"
+    tty.mkdir()
+    old, fresh = b"old-native-frame-52\n", b"fresh-native-frame-52\n"
+    header = struct.pack("<iLiiLL", 3, 0, len(old), 2, 1792404000, 0)
+    old_path, fresh_path = tty / "session-1.log", tty / "session-2.log"
+    old_path.write_bytes((header + old) * 130)
+    fresh_frame = struct.pack("<iLiiLL", 3, 0, len(fresh), 2, int(clock[0]), 0) + fresh
+    fresh_path.write_bytes(fresh_frame)
+    monkeypatch.setenv("COLLECTOR_DB_PATH", str(journal.database))
+    monkeypatch.setenv("COWRIE_SENSOR_ID", journal.sensor)
+    monkeypatch.setenv("COWRIE_LOG_DIR", str(logs))
+    assert main(["--role", "raw", "--once"], clock=lambda: clock[0]) == 0
+    clock[0] = 1793613600.0
+    inode = old_path.stat()
+    original_write, original_sync = os.pwrite, os.fsync
+
+    def target(fd: int) -> bool:
+        info = os.fstat(fd)
+        return (info.st_dev, info.st_ino) == (inode.st_dev, inode.st_ino)
+
+    def write(fd: int, data: Any, offset: int) -> int:
+        if target(fd):
+            original_write(fd, data[:1], offset)
+            raise OSError("synthetic partial TTY write")
+        return original_write(fd, data, offset)
+
+    def sync(fd: int) -> None:
+        if target(fd):
+            raise OSError("synthetic TTY fsync failure")
+        original_sync(fd)
+
+    with monkeypatch.context() as fault:
+        if phase == "write":
+            fault.setattr(os, "pwrite", write)
+        else:
+            fault.setattr(os, "fsync", sync)
+        assert main(["--role", "raw", "--once"], clock=lambda: clock[0]) == 1
+    assert fresh_path.read_bytes() == fresh_frame
+    assert main(["--role", "raw", "--once"], clock=lambda: clock[0]) == 0
+    content = old_path.read_bytes()
+    assert len(content) == len(header + old) * 130
+    assert old not in content
+    assert all(
+        content[start : start + len(header)] == header
+        for start in range(0, len(content), len(header + old))
+    )
+    assert fresh_path.read_bytes() == fresh_frame
 
 
 def test_unmanaged_archive_does_not_produce_false_cleanup_success(

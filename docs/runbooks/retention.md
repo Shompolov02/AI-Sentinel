@@ -100,7 +100,16 @@ Exit 0 означает завершение наступивших операц
 отсутствия текста в томах. На работающем collector сбрасывается только дочерний
 Fluent Bit: chunks затираются, допустимый outbox передаётся повторно. Cowrie и
 его сессии продолжаются. Истёкшее недоставленное событие даёт локальный критический
-`buffer_event_expired`; ёмкость/перегрузка относятся к #52.
+`buffer_event_expired`; ёмкость и перегрузка описаны в
+[runbook collector #52](cowrie-collector.md#ограничение-накопления-52).
+Сигнал следует за commit удаления payload и может повториться после сбоя;
+он сам по себе не подтверждает физическую очистку chunks. Живой collector
+владеет lease `fluent-owner.lock` (0660/GID 999): raw-очиститель не нормализует
+новые записи параллельно с ним. После остановки collector standalone-очистка
+соблюдает тот же `COLLECTOR_OUTBOX_BYTES`. При обновлении пересоздайте collector,
+retention и core-intake; прежний ingress должен разрешать авторизованный HEAD.
+Не удаляйте lease/lock вручную. TTY/служебные файлы очищаются порциями с
+освобождением реестра; `--once` возвращает успех только после полного прохода.
 
 Core закрывает выдачу/новый анализ просроченного текста независимо от фонового
 цикла. Пока физическое удаление источника не подтверждено, raw даёт 503 без
@@ -122,6 +131,11 @@ uv run pytest -q tests/unit/test_retention.py tests/unit/test_retention_lifecycl
 CORE_GUARD_MODEL_DIR="$PWD/.local/prompt-guard/model" AI_SENTINEL_REQUIRE_GUARD=1 \
   uv run pytest -q -m runtime tests/integration/test_retention_stack_runtime.py
 ```
+
+Для повторного запуска при недоступности Docker registry можно добавить
+`AI_SENTINEL_RUNTIME_REUSE_IMAGES=1`, если образы уже собраны из текущего checkout
+и их исходники/зависимости проверены. По умолчанию тест собирает образы заново;
+этот режим не заменяет обязательные сборки и security gate.
 
 Тестовый clock смонтирован только в собственный harness и не является настройкой
 production HTTP. Проверяются настоящий Cowrie, Fluent Bit, TLS, Guard, reader,

@@ -56,6 +56,13 @@ ID события — UUID; source_ip — IPv4/IPv6; порты — целые 1
 очередь или недоступную SQLite. В этих случаях новая задача не подтверждается.
 Построение идентификатора настоящим нормализатором определено в ADR 0003 (#46).
 
+Дополнение #52: успешный POST сообщает глубину незавершённых задач в
+`X-Core-Queue-Depth`; 503 из-за заполнения очереди сообщает 1000. Авторизованный
+`HEAD /internal/events` через тот же TLS возвращает этот заголовок без тела
+и без создания задачи. Collector использует его для backpressure и обнаружения
+восстановления при пустом outbox. Подробности —
+[collector-buffer-v1.md](collector-buffer-v1.md).
+
 Состояния: queued → processing → completed или failed. При failed вердикта нет.
 `GET /api/tasks/{task_id}` требует пользовательский сеанс SecOps и возвращает
 `task_id`, `correlation_id`, `state`, `created_at` (Unix UTC), `event`, `history`,
