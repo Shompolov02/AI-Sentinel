@@ -1,4 +1,4 @@
-FROM python:3.11-slim-bookworm@sha256:a36c24f9cbdf4fd0f52d67f0823eeac19c2028c637cecc392d97f980d4fec56b AS builder
+FROM python:3.15-slim-bookworm@sha256:4e03260adeeebafccd084f3584e6b84823aba5651cfb53ef8a078ed441ddf9cd AS builder
 
 RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
@@ -10,7 +10,7 @@ RUN python -m compileall -q --invalidation-mode checked-hash /src/ai_sentinel_sm
     && mkdir -p /opt/smoke \
     && cp -a /src/ai_sentinel_smoke /opt/smoke/
 
-FROM python:3.11-slim-bookworm@sha256:a36c24f9cbdf4fd0f52d67f0823eeac19c2028c637cecc392d97f980d4fec56b AS runtime
+FROM python:3.15-slim-bookworm@sha256:4e03260adeeebafccd084f3584e6b84823aba5651cfb53ef8a078ed441ddf9cd AS runtime
 
 RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
